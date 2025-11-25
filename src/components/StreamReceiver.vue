@@ -209,6 +209,19 @@ const confirmSpeakerPanel = () => {
   changeAudioOutput();
 };
 
+// マイク取得時にブラウザ標準のノイズ抑制などを有効化
+const Noise_Suppression= (deviceId) => {
+  const audioConstraints = {
+    noiseSuppression: true,  //背景ノイズ（キーボード音、PCファン、風切り音など）を軽減する
+    echoCancellation: true,  //エコー（ハウリング）を抑制する
+    autoGainControl: true //自動音量調整を有効にする
+  };
+  if (deviceId) {
+    audioConstraints.deviceId = deviceId;
+  }
+  return { audio: audioConstraints };
+};
+
 // 🆕 SkyWay API でデバイス一覧を取得
 const loadDevices = async () => {
   try {
@@ -547,9 +560,9 @@ const changeAudioInput = async () => {
     }
     
     // 🆕 SkyWay API で選択されたデバイスのストリームを作成
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream({
-      audio: { deviceId: selectedAudioInputId.value }
-    });
+    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
+      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
+    );
     localAudioStream.value = audioStream;
     
     const audioPub = await localMember.value.publish(audioStream);
@@ -711,7 +724,9 @@ const joinRoom = async () => {
     // ローカルカメラ映像 (音声含めたければ別メソッドも可)
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
     // ローカルの映像・音声ストリームを作成して publish（重要）
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream();
+    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
+      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
+    );
     // 退出時に解放するため保持（追加）
     localVideoStream.value = videoStream;
     localAudioStream.value = audioStream;
