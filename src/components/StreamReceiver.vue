@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'; 
 import { SkyWayContext, SkyWayRoom, SkyWayStreamFactory, uuidV4 } from '@skyway-sdk/room';
+import { BlurBackground } from 'skyway-video-processors'; // 追加: 背景ぼかし用
 import GetToken from './SkywayToken.js';
 import { toast } from 'vue3-toastify';
 import "vue3-toastify/dist/index.css";
@@ -29,6 +30,9 @@ const isAudioMuted = ref(false);
 const isVideoMuted = ref(false); 
 // 画面共有状態管理（追加）
 const isScreenSharing = ref(false); 
+const isBackgroundBlurred = ref(false);
+// Vue の reactivity に巻き込まないため通常変数で保持（Proxy 化による WASM 例外回避）
+let backgroundProcessor = null;
 const baseUrl = window.location.href.split('?')[0];
 // Publication を保持（publish の戻り値として得られるオブジェクト）
 const localVideoPublication = ref(null); 
@@ -207,6 +211,81 @@ const confirmSpeakerPanel = () => {
   selectedAudioOutputId.value = tempSelectedAudioOutputId.value;
   showSpeakerPanel.value = false;
   changeAudioOutput();
+};
+
+// 背景ぼかし ON
+const enableBackgroundBlur = async () => {
+  if (!joined.value || !localMember.value) return;
+  if (isScreenSharing.value) {
+    toast.info('画面共有中は背景ぼかしを使用できません');
+    return;
+  }
+  try {
+    // 既存の映像を unpublish
+    if (localVideoPublication.value) {
+      await localMember.value.unpublish(localVideoPublication.value);
+    }
+    // 既存の映像トラックを解放
+    if (localVideoStream.value) {
+      localVideoStream.value.release?.();
+    }
+    // プロセッサ初期化
+    backgroundProcessor = new BlurBackground();
+    await backgroundProcessor.initialize();
+    // 加工映像の VideoStream を作成
+    const processedVideo = await SkyWayStreamFactory.createCustomVideoStream(backgroundProcessor, {
+      stopTrackWhenDisabled: true,
+    });
+    localVideoStream.value = processedVideo;
+    // publish
+    const videoPub = await localMember.value.publish(processedVideo);
+    localVideoPublication.value = videoPub;
+    // ローカル映像を置き換え
+    if (localVideoEl.value) {
+      processedVideo.attach(localVideoEl.value);
+    }
+    isBackgroundBlurred.value = true;
+    toast.success('背景ぼかしを有効化しました');
+  } catch (e) {
+    console.error('背景ぼかし有効化エラー:', e);
+    toast.error('背景ぼかしの有効化に失敗しました: ' + (e?.message || e));
+  }
+};
+
+// 背景ぼかし OFF（通常カメラに戻す）
+const disableBackgroundBlur = async () => {
+  if (!joined.value || !localMember.value) return;
+  try {
+    if (localVideoPublication.value) {
+      await localMember.value.unpublish(localVideoPublication.value);
+    }
+    if (localVideoStream.value) {
+      localVideoStream.value.release?.();
+    }
+    // プロセッサ破棄（存在すれば）
+    try { await backgroundProcessor?.dispose?.(); } catch {}
+    backgroundProcessor = null;
+    // 通常カメラに復帰（選択デバイスがあれば反映）
+    const cameraStream = await SkyWayStreamFactory.createCameraVideoStream(
+      selectedVideoInputId.value ? { video: { deviceId: selectedVideoInputId.value } } : undefined
+    );
+    localVideoStream.value = cameraStream;
+    const videoPub = await localMember.value.publish(cameraStream);
+    localVideoPublication.value = videoPub;
+    if (localVideoEl.value) {
+      cameraStream.attach(localVideoEl.value);
+    }
+    isBackgroundBlurred.value = false;
+    toast.success('背景ぼかしを無効化しました');
+  } catch (e) {
+    console.error('背景ぼかし無効化エラー:', e);
+    toast.error('背景ぼかしの無効化に失敗しました: ' + (e?.message || e));
+  }
+};
+
+const toggleBackgroundBlur = async () => {
+  if (isBackgroundBlurred.value) return disableBackgroundBlur();
+  return enableBackgroundBlur();
 };
 
 // マイク取得時にブラウザ標準のノイズ抑制などを有効化
@@ -578,6 +657,10 @@ const changeAudioInput = async () => {
 // 🆕 カメラ入力デバイスを切り替える
 const changeVideoInput = async () => {
   if (!joined.value || !localMember.value || isScreenSharing.value) return;
+  if (isBackgroundBlurred.value) {
+    toast.info('背景ぼかし有効中はカメラ切替は未対応です（ぼかしをOFFにしてから切替）');
+    return;
+  }
   
   try {
     if (localVideoPublication.value) {
@@ -998,6 +1081,11 @@ const leaveRoom = async () => {
     // 🔊 話者検出停止 & クリーンアップ
     stopAudioLevelMonitor();
 
+    // 背景ぼかしプロセッサ破棄
+    try { await backgroundProcessor?.dispose?.(); } catch {}
+    backgroundProcessor = null;
+    isBackgroundBlurred.value = false;
+
     // NOTE: room インスタンスを null にする前に（デバッグ用に）メンバー確認
     console.log('[LEAVE] room.members snapshot (before null)', context.room?.members?.map(m => m.id));
 
@@ -1043,7 +1131,7 @@ onMounted(async () => {
 });
 
 // クリーンアップ（追加）
-onUnmounted(() => {
+onUnmounted(async () => {
   document.removeEventListener('keydown', handleKeydown);
   // devicechange リスナ解除
   try {
@@ -1054,6 +1142,8 @@ onUnmounted(() => {
   } catch (e) {
     console.warn('remove devicechange listener failed:', e);
   }
+  // 背景ぼかしのクリーンアップ
+  try { await disableBackgroundBlur(); } catch {}
 });
 </script>
 
@@ -1142,6 +1232,19 @@ onUnmounted(() => {
           ]"
         >
           {{ isScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
+        </button>
+
+        <!-- 背景ぼかしボタン -->
+        <button
+          @click="toggleBackgroundBlur"
+          :class="[
+            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
+            isBackgroundBlurred
+              ? 'bg-purple-600 text-white hover:bg-purple-700 focus:ring-purple-400'
+              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
+          ]"
+        >
+          {{ isBackgroundBlurred ? '🟣 背景ぼかしON' : '🟣 背景ぼかし' }}
         </button>
       </div>
 
