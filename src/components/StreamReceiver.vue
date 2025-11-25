@@ -38,6 +38,91 @@ const enlargedVideo = ref(null);
 const subscribedPublicationIds = new Set();
 // 追加: ルームイベントのハンドラ参照（退出時に解除するため）
 const roomEventHandlers = { onStreamPublished: null };
+// devicechange ハンドラ参照（追加）
+let deviceChangeHandler = null;
+
+// 追加： デバイス選択用の state
+const videoInputDevices = ref([]);
+const audioInputDevices = ref([]);
+const audioOutputDevices = ref([]);
+const selectedVideoInputId = ref('');
+const selectedAudioInputId = ref('');
+const selectedAudioOutputId = ref('');
+
+// UI: パネル表示フラグと一時選択（ボタン押下で開いて確定/キャンセルする）
+const showCameraPanel = ref(false);
+const showMicPanel = ref(false);
+const showSpeakerPanel = ref(false);
+const tempSelectedVideoInputId = ref('');
+const tempSelectedAudioInputId = ref('');
+const tempSelectedAudioOutputId = ref('');
+
+const openCameraPanel = () => {
+  tempSelectedVideoInputId.value = selectedVideoInputId.value || (videoInputDevices.value[0]?.deviceId || '');
+  showCameraPanel.value = true;
+};
+const cancelCameraPanel = () => { showCameraPanel.value = false; };
+const confirmCameraPanel = async () => {
+  selectedVideoInputId.value = tempSelectedVideoInputId.value;
+  showCameraPanel.value = false;
+  await changeVideoInput();
+};
+
+const openMicPanel = () => {
+  tempSelectedAudioInputId.value = selectedAudioInputId.value || (audioInputDevices.value[0]?.deviceId || '');
+  showMicPanel.value = true;
+};
+const cancelMicPanel = () => { showMicPanel.value = false; };
+const confirmMicPanel = async () => {
+  selectedAudioInputId.value = tempSelectedAudioInputId.value;
+  showMicPanel.value = false;
+  await changeAudioInput();
+};
+
+const openSpeakerPanel = () => {
+  tempSelectedAudioOutputId.value = selectedAudioOutputId.value || (audioOutputDevices.value[0]?.deviceId || '');
+  showSpeakerPanel.value = true;
+};
+const cancelSpeakerPanel = () => { showSpeakerPanel.value = false; };
+const confirmSpeakerPanel = () => {
+  selectedAudioOutputId.value = tempSelectedAudioOutputId.value;
+  showSpeakerPanel.value = false;
+  changeAudioOutput();
+};
+
+// 🆕 SkyWay API でデバイス一覧を取得
+const loadDevices = async () => {
+  try {
+    // デバイス名を取得するため、まず一度ストリームを取得
+    const tempStream = await SkyWayStreamFactory.createMicrophoneAudioAndCameraStream();
+    // すぐに停止
+    tempStream.audio?.release();
+    tempStream.video?.release();
+    
+    // SkyWay API でデバイス一覧を取得
+    videoInputDevices.value = await SkyWayStreamFactory.enumerateInputVideoDevices();
+    audioInputDevices.value = await SkyWayStreamFactory.enumerateInputAudioDevices();
+    audioOutputDevices.value = await SkyWayStreamFactory.enumerateOutputAudioDevices();
+    
+    // デフォルトデバイスを選択
+    if (videoInputDevices.value.length > 0 && !selectedVideoInputId.value) {
+      selectedVideoInputId.value = videoInputDevices.value[0].deviceId;
+    }
+    if (audioInputDevices.value.length > 0 && !selectedAudioInputId.value) {
+      selectedAudioInputId.value = audioInputDevices.value[0].deviceId;
+    }
+    if (audioOutputDevices.value.length > 0 && !selectedAudioOutputId.value) {
+      selectedAudioOutputId.value = audioOutputDevices.value[0].deviceId;
+    }
+  } catch (e) {
+    console.error('デバイス取得失敗:', e);
+    toast.error('デバイス一覧の取得に失敗しました');
+  }
+  // loadDevices の try ブロックの最後に追加（デバッグ用）
+console.log('videoInputDevices:', videoInputDevices.value);
+console.log('audioInputDevices:', audioInputDevices.value);
+console.log('audioOutputDevices:', audioOutputDevices.value);
+};
 
 // ヘルパ: SkyWay stream オブジェクトから MediaStreamTrack を取り出す
 const extractTrack = (stream, kind = 'video') => {
@@ -167,6 +252,16 @@ const attachRemoteStream = (stream, publication) => {
       el.style.display = 'none';
       streamArea.value.appendChild(el);
       stream.attach(el);
+      // 出力先が選択されていれば可能なブラウザで setSinkId を適用
+      try {
+        if (selectedAudioOutputId.value && typeof el.setSinkId === 'function') {
+          el.setSinkId(selectedAudioOutputId.value).catch((err) => {
+            console.warn('setSinkId on remote audio failed:', err);
+          });
+        }
+      } catch (e) {
+        console.warn('apply setSinkId failed:', e);
+      }
       el.play?.().catch(() => {});
       remoteVideos.value.push(el);
     }
@@ -303,6 +398,82 @@ const screenShare = async () => {
   }
 };
 
+// 🆕 マイク入力デバイスを切り替える（簡潔版）
+const changeAudioInput = async () => {
+  if (!joined.value || !localMember.value) return;
+  
+  try {
+    if (localAudioPublication.value) {
+      await localMember.value.unpublish(localAudioPublication.value);
+    }
+    
+    if (localAudioStream.value) {
+      localAudioStream.value.release?.();
+    }
+    
+    // 🆕 SkyWay API で選択されたデバイスのストリームを作成
+    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream({
+      audio: { deviceId: selectedAudioInputId.value }
+    });
+    localAudioStream.value = audioStream;
+    
+    const audioPub = await localMember.value.publish(audioStream);
+    localAudioPublication.value = audioPub;
+    
+    toast.success('マイクを切り替えました');
+  } catch (e) {
+    console.error('マイク切り替えエラー:', e);
+    toast.error('マイクの切り替えに失敗しました: ' + e.message);
+  }
+};
+
+// 🆕 カメラ入力デバイスを切り替える
+const changeVideoInput = async () => {
+  if (!joined.value || !localMember.value || isScreenSharing.value) return;
+  
+  try {
+    if (localVideoPublication.value) {
+      await localMember.value.unpublish(localVideoPublication.value);
+    }
+    
+    if (localVideoStream.value) {
+      localVideoStream.value.release?.();
+    }
+    
+    // 🆕 SkyWay API で選択されたデバイスのストリームを作成
+    const videoStream = await SkyWayStreamFactory.createCameraVideoStream({
+      video: { deviceId: selectedVideoInputId.value }
+    });
+    localVideoStream.value = videoStream;
+    
+    const videoPub = await localMember.value.publish(videoStream);
+    localVideoPublication.value = videoPub;
+    
+    if (localVideoEl.value) {
+      videoStream.attach(localVideoEl.value);
+    }
+    
+    toast.success('カメラを切り替えました');
+  } catch (e) {
+    console.error('カメラ切り替えエラー:', e);
+    toast.error('カメラの切り替えに失敗しました: ' + e.message);
+  }
+};
+
+// 🆕 音声出力デバイスを切り替える（簡潔版）
+const changeAudioOutput = () => {
+  const audioElements = streamArea.value?.querySelectorAll('audio');
+  audioElements?.forEach(el => {
+    if (el.setSinkId && selectedAudioOutputId.value) {
+      el.setSinkId(selectedAudioOutputId.value).catch(e => {
+        console.warn('setSinkId failed:', e);
+      });
+    }
+  });
+  toast.success('スピーカーを切り替えました');
+};
+
+
 // 映像拡大機能
 const enlargeVideo = (videoEl) => {
   if (enlargedVideo.value) return;
@@ -434,24 +605,25 @@ const joinRoom = async () => {
     localContainer.className = 'relative inline-block';
     streamArea.value.appendChild(localContainer);
 
-    const localVideoEl = document.createElement('video');
-    localVideoEl.muted = true;
-    localVideoEl.playsInline = true;
-    localVideoEl.autoplay = true;
-    localVideoEl.className = 'w-96 h-72 object-cover rounded border';
-    localContainer.appendChild(localVideoEl);
+    // DOM 変数名を ref と衝突させないよう localVideoElement と命名
+    const localVideoElement = document.createElement('video');
+    localVideoElement.muted = true;
+    localVideoElement.playsInline = true;
+    localVideoElement.autoplay = true;
+    localVideoElement.className = 'w-96 h-72 object-cover rounded border';
+    localContainer.appendChild(localVideoElement);
 
     // ローカル映像用拡大ボタン（追加）
     const localEnlargeBtn = document.createElement('button');
     localEnlargeBtn.innerHTML = '⛶';
     localEnlargeBtn.className = 'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
-    localEnlargeBtn.onclick = () => enlargeVideo(localVideoEl);
+    localEnlargeBtn.onclick = () => enlargeVideo(localVideoElement);
     localContainer.appendChild(localEnlargeBtn);
 
     // SkyWay の stream を video に接続
-    videoStream.attach(localVideoEl);
-    // 退出時に解放するため保持（追加）
-    localVideoEl.value = localVideoEl;
+    videoStream.attach(localVideoElement);
+    // 退出や切替で使えるように ref に DOM を保存
+    localVideoEl.value = localVideoElement;
     console.log('[JOIN] ローカル video 要素 attach 完了');
 
     // 追加: 既に公開済みの publication にも一度だけ subscribe（自分のは除外）
@@ -682,9 +854,22 @@ const leaveRoom = async () => {
 // onMounted: URL に room=xxx があれば利用
 onMounted(async () => {
   await getContext();
+  await loadDevices(); // デバイス選択で追加： デバイス一覧をロード
   const qRoom = new URLSearchParams(window.location.search).get('room');
   if (qRoom) {
     roomId.value = qRoom;
+  }
+  // デバイスの接続/切断を検知してデバイスリストを更新
+  try {
+    if (navigator?.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+      deviceChangeHandler = () => {
+        console.log('[DEVICE] devicechange detected, reloading devices');
+        loadDevices().catch(err => console.warn('loadDevices failed on devicechange:', err));
+      };
+      navigator.mediaDevices.addEventListener('devicechange', deviceChangeHandler);
+    }
+  } catch (e) {
+    console.warn('devicechange listener setup failed:', e);
   }
   // ESCキーリスナー追加
   document.addEventListener('keydown', handleKeydown);
@@ -693,6 +878,15 @@ onMounted(async () => {
 // クリーンアップ（追加）
 onUnmounted(() => {
   document.removeEventListener('keydown', handleKeydown);
+  // devicechange リスナ解除
+  try {
+    if (navigator?.mediaDevices && deviceChangeHandler && typeof navigator.mediaDevices.removeEventListener === 'function') {
+      navigator.mediaDevices.removeEventListener('devicechange', deviceChangeHandler);
+      deviceChangeHandler = null;
+    }
+  } catch (e) {
+    console.warn('remove devicechange listener failed:', e);
+  }
 });
 </script>
 
@@ -743,8 +937,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-     <!-- ミュートボタン（新規追加） -->
-      <div v-if="joined" class="space-x-2">
+    <!-- ミュートボタン（新規追加） -->
+    <div v-if="joined" class="space-x-2">
         <!-- 音声ミュートボタン -->
         <button
           @click="toggleAudioMute"
@@ -782,6 +976,78 @@ onUnmounted(() => {
         >
           {{ isScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
         </button>
+      </div>
+
+      <!-- カメラ / マイク 切替 UI -->
+      <div v-if="joined" class="space-x-2 mt-3 flex items-center flex-wrap">
+        <!-- カメラ切替 -->
+        <div class="flex items-center space-x-2">
+          <label class="text-sm">カメラ</label>
+          <button
+            @click="openCameraPanel"
+            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
+          >
+            カメラ切り替え
+          </button>
+          <!-- Camera panel -->
+          <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
+            <div class="flex items-center space-x-2">
+              <select v-model="tempSelectedVideoInputId" class="px-3 py-2 rounded border text-sm">
+                <option v-for="d in videoInputDevices" :key="d.deviceId" :value="d.deviceId">
+                  {{ d.label || d.deviceId }}
+                </option>
+              </select>
+              <button @click="confirmCameraPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
+              <button @click="cancelCameraPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- マイク切替 -->
+        <div class="flex items-center space-x-2 ml-4">
+          <label class="text-sm">マイク</label>
+          <button
+            @click="openMicPanel"
+            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
+          >
+            マイク切り替え
+          </button>
+          <!-- Mic panel -->
+          <div v-if="showMicPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
+            <div class="flex items-center space-x-2">
+              <select v-model="tempSelectedAudioInputId" class="px-3 py-2 rounded border text-sm">
+                <option v-for="d in audioInputDevices" :key="d.deviceId" :value="d.deviceId">
+                  {{ d.label || d.deviceId }}
+                </option>
+              </select>
+              <button @click="confirmMicPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
+              <button @click="cancelMicPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- スピーカー(音声出力)切替 -->
+        <div class="flex items-center space-x-2 ml-4">
+          <label class="text-sm">スピーカー</label>
+          <button
+            @click="openSpeakerPanel"
+            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
+          >
+            スピーカー切り替え
+          </button>
+          <!-- Speaker panel -->
+          <div v-if="showSpeakerPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
+            <div class="flex items-center space-x-2">
+              <select v-model="tempSelectedAudioOutputId" class="px-3 py-2 rounded border text-sm">
+                <option v-for="d in audioOutputDevices" :key="d.deviceId" :value="d.deviceId">
+                  {{ d.label || d.deviceId }}
+                </option>
+              </select>
+              <button @click="confirmSpeakerPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
+              <button @click="cancelSpeakerPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
+            </div>
+          </div>
+        </div>
       </div>
 
     <!-- ルーム情報表示 -->
