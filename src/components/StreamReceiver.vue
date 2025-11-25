@@ -41,28 +41,41 @@ const roomEventHandlers = { onStreamPublished: null };
 // devicechange ハンドラ参照（追加）
 let deviceChangeHandler = null;
 
-// 🔊 話者検出関連状態 / 関数
-const audioContext = ref(null);            // Web Audio Context
-let audioLevelAnimationId = null;          // rAF ID
-const speakerAnalyzers = new Map();        // memberId -> { analyser, data, history:[], speaking }
-const speakingThresholdOn = 0.04;          // 発話開始閾値
-const speakingThresholdOff = 0.02;         // 発話終了閾値（ヒステリシス）
-const rmsHistoryLength = 5;                // 移動平均サンプル数
 
+// 目的:現在「話している」参加者の映像枠をリアルタイムに視覚的に強調表示する。
+// 手法概要:
+//   1. SkyWay の publish/subscribe 後に取得した audio MediaStreamTrack を
+//      Web Audio API (AudioContext + AnalyserNode) に接続。
+//   2. AnalyserNode の時間領域データ (getByteTimeDomainData) を取得し RMS(実効値) を計算。
+//   3. 直近 N 件の RMS の移動平均を取り、二重閾値 (ヒステリシス) を使って発話開始/終了判定。
+//      - 閾値を分離することで “ON/OFF が高速に揺れる” チャタリングを防止。
+//   4. 状態が変化したときのみ DOM の枠スタイル (outline / box-shadow) を更新。
+const audioContext = ref(null);            // 単一共有 AudioContext (必要時に遅延生成)
+let audioLevelAnimationId = null;          // rAF ループ用 ID （null なら未稼働）
+const speakerAnalyzers = new Map();        // memberId -> { analyser, data:Uint8Array, history:number[], speaking:boolean }
+const speakingThresholdOn = 0.04;          // 発話開始判定用 RMS 移動平均閾値
+const speakingThresholdOff = 0.02;         // 発話終了判定用閾値（オン時より低く設定し安定化）
+const rmsHistoryLength = 5;                // 移動平均に用いる履歴サンプル数
+
+// AudioContext を必要になったタイミングで生成（Safari 等でも互換性確保）
 const ensureAudioContext = () => {
   if (!audioContext.value) {
-    try { audioContext.value = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {
+    try {
+      audioContext.value = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
       console.warn('AudioContext 作成失敗:', e);
     }
   }
   return audioContext.value;
 };
 
+// 指定 memberId の映像コンテナ要素取得 (ハイライト対象)
 const getContainerForMember = (memberId) => {
   if (!streamArea.value) return null;
   return streamArea.value.querySelector(`[data-member-id="${memberId}"]`);
 };
 
+// 発話状態に応じ枠スタイルを更新（変化時のみ副作用）
 const updateSpeakingVisual = (memberId, speaking) => {
   const container = getContainerForMember(memberId);
   if (!container) return;
@@ -77,52 +90,57 @@ const updateSpeakingVisual = (memberId, speaking) => {
   }
 };
 
+// 指定メンバーの音声トラックを解析対象として登録 (重複はスキップ)
 const setupAudioLevel = (memberId, track) => {
-  if (!track || track.kind !== 'audio') return;
-  if (speakerAnalyzers.has(memberId)) return; // 既に設定済み
+  if (!track || track.kind !== 'audio') return;            // 無効トラック拒否
+  if (speakerAnalyzers.has(memberId)) return;              // 既存登録回避
   const ctx = ensureAudioContext();
   if (!ctx) return;
   try {
-    const ms = new MediaStream([track]);
-    const src = ctx.createMediaStreamSource(ms);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
+    const ms = new MediaStream([track]);                   // 単一トラックのみを MediaStream 化
+    const src = ctx.createMediaStreamSource(ms);           // Web Audio 入口ノード
+    const analyser = ctx.createAnalyser();                 // 軽量時間領域解析ノード
+    analyser.fftSize = 512;                                // 分解能（負荷とバランス）
     src.connect(analyser);
-    const data = new Uint8Array(analyser.fftSize);
+    const data = new Uint8Array(analyser.fftSize);         // 波形格納用バッファ
     speakerAnalyzers.set(memberId, { analyser, data, history: [], speaking: false });
   } catch (e) {
     console.warn('setupAudioLevel 失敗:', e);
   }
 };
 
+// ByteTimeDomainData (0..255) を -1..1 に正規化し RMS を算出
 const computeRms = (data) => {
   let sum = 0;
   for (let i = 0; i < data.length; i++) {
-    const v = (data[i] - 128) / 128; // -1..1
+    const v = (data[i] - 128) / 128; // 中心 128 → 0
     sum += v * v;
   }
-  return Math.sqrt(sum / data.length); // 0..1
+  return Math.sqrt(sum / data.length); // RMS (0..1 目安)
 };
 
+// rAF で全参加者の最新 RMS を計算し発話状態を更新
 const audioLevelLoop = () => {
   for (const [memberId, obj] of speakerAnalyzers.entries()) {
-    obj.analyser.getByteTimeDomainData(obj.data);
-    const rms = computeRms(obj.data);
-    obj.history.push(rms);
+    obj.analyser.getByteTimeDomainData(obj.data);          // 波形取得
+    const rms = computeRms(obj.data);                      // 単発 RMS
+    obj.history.push(rms);                                 // 履歴蓄積
     if (obj.history.length > rmsHistoryLength) obj.history.shift();
-    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length;
+    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length; // 移動平均
     const prev = obj.speaking;
     let next = prev;
+    // 二重閾値で ON/OFF 判定安定化
     if (!prev && avg >= speakingThresholdOn) next = true;
     else if (prev && avg < speakingThresholdOff) next = false;
     if (next !== prev) {
       obj.speaking = next;
-      updateSpeakingVisual(memberId, next);
+      updateSpeakingVisual(memberId, next);                // 変化時のみ DOM 更新
     }
   }
-  audioLevelAnimationId = requestAnimationFrame(audioLevelLoop);
+  audioLevelAnimationId = requestAnimationFrame(audioLevelLoop); // 次フレーム継続
 };
 
+// 解析ループ開始（まだ動いていない場合のみ）
 const startAudioLevelMonitor = () => {
   if (audioLevelAnimationId == null) {
     try { audioContext.value?.resume?.(); } catch {}
@@ -130,12 +148,13 @@ const startAudioLevelMonitor = () => {
   }
 };
 
+// 解析停止とリソース破棄（退出時など）
 const stopAudioLevelMonitor = () => {
   if (audioLevelAnimationId != null) {
     cancelAnimationFrame(audioLevelAnimationId);
     audioLevelAnimationId = null;
   }
-  for (const memberId of speakerAnalyzers.keys()) updateSpeakingVisual(memberId, false);
+  for (const memberId of speakerAnalyzers.keys()) updateSpeakingVisual(memberId, false); // ハイライト解除
   speakerAnalyzers.clear();
   try { audioContext.value?.close?.(); } catch {}
   audioContext.value = null;
