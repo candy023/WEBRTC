@@ -41,6 +41,106 @@ const roomEventHandlers = { onStreamPublished: null };
 // devicechange ハンドラ参照（追加）
 let deviceChangeHandler = null;
 
+// 🔊 話者検出関連状態 / 関数
+const audioContext = ref(null);            // Web Audio Context
+let audioLevelAnimationId = null;          // rAF ID
+const speakerAnalyzers = new Map();        // memberId -> { analyser, data, history:[], speaking }
+const speakingThresholdOn = 0.04;          // 発話開始閾値
+const speakingThresholdOff = 0.02;         // 発話終了閾値（ヒステリシス）
+const rmsHistoryLength = 5;                // 移動平均サンプル数
+
+const ensureAudioContext = () => {
+  if (!audioContext.value) {
+    try { audioContext.value = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {
+      console.warn('AudioContext 作成失敗:', e);
+    }
+  }
+  return audioContext.value;
+};
+
+const getContainerForMember = (memberId) => {
+  if (!streamArea.value) return null;
+  return streamArea.value.querySelector(`[data-member-id="${memberId}"]`);
+};
+
+const updateSpeakingVisual = (memberId, speaking) => {
+  const container = getContainerForMember(memberId);
+  if (!container) return;
+  if (speaking) {
+    container.classList.add('speaking');
+    container.style.outline = '3px solid #22c55e';
+    container.style.boxShadow = '0 0 8px #22c55e';
+  } else {
+    container.classList.remove('speaking');
+    container.style.outline = '';
+    container.style.boxShadow = '';
+  }
+};
+
+const setupAudioLevel = (memberId, track) => {
+  if (!track || track.kind !== 'audio') return;
+  if (speakerAnalyzers.has(memberId)) return; // 既に設定済み
+  const ctx = ensureAudioContext();
+  if (!ctx) return;
+  try {
+    const ms = new MediaStream([track]);
+    const src = ctx.createMediaStreamSource(ms);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    src.connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+    speakerAnalyzers.set(memberId, { analyser, data, history: [], speaking: false });
+  } catch (e) {
+    console.warn('setupAudioLevel 失敗:', e);
+  }
+};
+
+const computeRms = (data) => {
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128; // -1..1
+    sum += v * v;
+  }
+  return Math.sqrt(sum / data.length); // 0..1
+};
+
+const audioLevelLoop = () => {
+  for (const [memberId, obj] of speakerAnalyzers.entries()) {
+    obj.analyser.getByteTimeDomainData(obj.data);
+    const rms = computeRms(obj.data);
+    obj.history.push(rms);
+    if (obj.history.length > rmsHistoryLength) obj.history.shift();
+    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length;
+    const prev = obj.speaking;
+    let next = prev;
+    if (!prev && avg >= speakingThresholdOn) next = true;
+    else if (prev && avg < speakingThresholdOff) next = false;
+    if (next !== prev) {
+      obj.speaking = next;
+      updateSpeakingVisual(memberId, next);
+    }
+  }
+  audioLevelAnimationId = requestAnimationFrame(audioLevelLoop);
+};
+
+const startAudioLevelMonitor = () => {
+  if (audioLevelAnimationId == null) {
+    try { audioContext.value?.resume?.(); } catch {}
+    audioLevelAnimationId = requestAnimationFrame(audioLevelLoop);
+  }
+};
+
+const stopAudioLevelMonitor = () => {
+  if (audioLevelAnimationId != null) {
+    cancelAnimationFrame(audioLevelAnimationId);
+    audioLevelAnimationId = null;
+  }
+  for (const memberId of speakerAnalyzers.keys()) updateSpeakingVisual(memberId, false);
+  speakerAnalyzers.clear();
+  try { audioContext.value?.close?.(); } catch {}
+  audioContext.value = null;
+};
+
 // 追加： デバイス選択用の state
 const videoInputDevices = ref([]);
 const audioInputDevices = ref([]);
@@ -191,6 +291,11 @@ const attachRemoteStream = (stream, publication) => {
       const container = document.createElement('div');
       container.className = 'relative inline-block';
 
+      // メンバーID付与（話者ハイライト用）
+      if (publication?.publisher?.id) {
+        container.dataset.memberId = publication.publisher.id;
+      }
+
     // 追加: publication id を保持（削除用に使う）映像の枠の削除の他
     if (publication?.id) {
     container.dataset.pubId = publication.id;
@@ -264,6 +369,17 @@ const attachRemoteStream = (stream, publication) => {
       }
       el.play?.().catch(() => {});
       remoteVideos.value.push(el);
+
+      // 音声トラックで話者検出セットアップ
+      try {
+        if (publication?.publisher?.id) {
+          const audioTrack = extractTrack(stream, 'audio');
+          setupAudioLevel(publication.publisher.id, audioTrack);
+          startAudioLevelMonitor();
+        }
+      } catch (e) {
+        console.warn('remote audio level setup failed:', e);
+      }
     }
   } catch (err) {
     console.error('attachRemoteStream failed:', err);
@@ -613,6 +729,9 @@ const joinRoom = async () => {
     localVideoElement.className = 'w-96 h-72 object-cover rounded border';
     localContainer.appendChild(localVideoElement);
 
+    // 自分のメンバーID付与
+    try { if (member.id) localContainer.dataset.memberId = member.id; } catch {}
+
     // ローカル映像用拡大ボタン（追加）
     const localEnlargeBtn = document.createElement('button');
     localEnlargeBtn.innerHTML = '⛶';
@@ -704,6 +823,17 @@ const joinRoom = async () => {
       RemoteVideoDomCount: remoteVideos.value.length,
       subscribedPublicationIds: [...subscribedPublicationIds]
     });
+
+    // 🔊 ローカル音声トラックで話者検出セットアップ
+    try {
+      const localAudioTrack = extractTrack(localAudioStream.value, 'audio');
+      if (member.id) {
+        setupAudioLevel(member.id, localAudioTrack);
+        startAudioLevelMonitor();
+      }
+    } catch (e) {
+      console.warn('local audio level setup failed:', e);
+    }
   } catch (e) {
     toast.error('ルーム参加に失敗しました: ' + e);
     console.error(e);
@@ -830,6 +960,9 @@ const leaveRoom = async () => {
     // 追加: subscribe 済み publication の記録をクリア
     subscribedPublicationIds.clear();
     console.log('[LEAVE] subscribedPublicationIds cleared');
+
+    // 🔊 話者検出停止 & クリーンアップ
+    stopAudioLevelMonitor();
 
     // NOTE: room インスタンスを null にする前に（デバッグ用に）メンバー確認
     console.log('[LEAVE] room.members snapshot (before null)', context.room?.members?.map(m => m.id));
@@ -982,7 +1115,7 @@ onUnmounted(() => {
       <div v-if="joined" class="space-x-2 mt-3 flex items-center flex-wrap">
         <!-- カメラ切替 -->
         <div class="flex items-center space-x-2">
-          <label class="text-sm">カメラ</label>
+          
           <button
             @click="openCameraPanel"
             class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
@@ -1005,7 +1138,7 @@ onUnmounted(() => {
 
         <!-- マイク切替 -->
         <div class="flex items-center space-x-2 ml-4">
-          <label class="text-sm">マイク</label>
+          <label class="text-sm"></label>
           <button
             @click="openMicPanel"
             class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
@@ -1028,7 +1161,7 @@ onUnmounted(() => {
 
         <!-- スピーカー(音声出力)切替 -->
         <div class="flex items-center space-x-2 ml-4">
-          <label class="text-sm">スピーカー</label>
+         
           <button
             @click="openSpeakerPanel"
             class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
