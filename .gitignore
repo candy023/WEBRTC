@@ -25,3 +25,13 @@ dist-ssr
 
 
 *.env.local
+
+First.js
+useMediaControl.js
+useRoomControl.js
+src/components/WebRTC_UI.vue
+src/components/composables/useSkywayRoom.js
+src/components/services/MediaStreamService.js
+src/components/services/RoomService.js
+src/components/services/VideoUIService.js
+src/components/utils/SkywayToken.js
