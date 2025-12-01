@@ -5,6 +5,9 @@ import { BlurBackground } from 'skyway-video-processors'; // 追加: 背景ぼ�
 import GetToken from './SkywayToken.js';
 import { toast } from 'vue3-toastify';
 import "vue3-toastify/dist/index.css";
+// RNNoise の WebAssembly 版を読み込むためのライブラリ。
+// これを使うことで、ブラウザ上で RNNoise のノイズ除去アルゴリズムが動作する。
+import { Rnnoise } from "@shiguredo/rnnoise-wasm";
 
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
@@ -46,20 +49,22 @@ const roomEventHandlers = { onStreamPublished: null };
 let deviceChangeHandler = null;
 
 
-// 目的:現在「話している」参加者の映像枠をリアルタイムに視覚的に強調表示する。
+// 目的: 現在「話している」参加者を映像枠のスタイルで強調表示する。
 // 手法概要:
-//   1. SkyWay の publish/subscribe 後に取得した audio MediaStreamTrack を
-//      Web Audio API (AudioContext + AnalyserNode) に接続。
-//   2. AnalyserNode の時間領域データ (getByteTimeDomainData) を取得し RMS(実効値) を計算。
-//   3. 直近 N 件の RMS の移動平均を取り、二重閾値 (ヒステリシス) を使って発話開始/終了判定。
-//      - 閾値を分離することで “ON/OFF が高速に揺れる” チャタリングを防止。
-//   4. 状態が変化したときのみ DOM の枠スタイル (outline / box-shadow) を更新。
+//   (A) RMSベース: AnalyserNode の時間領域データから移動平均RMSを算出し二重閾値で安定判定。
+//   (B) RNNoise VADベース: ローカル音声に限り RNNoise の VAD 値(0..1)を受信。
+//       → RMS が低くても VAD が十分高い場合は “話している” とみなす補強判定。
+//   (C) 判定結果が変化した時のみ DOM 更新し描画負荷を最小化。
+
 const audioContext = ref(null);            // 単一共有 AudioContext (必要時に遅延生成)
 let audioLevelAnimationId = null;          // rAF ループ用 ID （null なら未稼働）
 const speakerAnalyzers = new Map();        // memberId -> { analyser, data:Uint8Array, history:number[], speaking:boolean }
-const speakingThresholdOn = 0.04;          // 発話開始判定用 RMS 移動平均閾値
-const speakingThresholdOff = 0.02;         // 発話終了判定用閾値（オン時より低く設定し安定化）
+const speakingThresholdOn = 0.04;          // 発話開始 (RMS) 閾値
+const speakingThresholdOff = 0.02;         // 発話終了 (RMS) 閾値
 const rmsHistoryLength = 5;                // 移動平均に用いる履歴サンプル数
+const vadSpeakingThreshold = 0.6;          // VAD補強判定 閾値 (0..1)
+const latestVadValue = ref(0);             // RNNoise Worklet からの最新 VAD 値
+const isRnnoiseEnabled = ref(true);        // RNNoise ON/OFF トグル状態
 
 // AudioContext を必要になったタイミングで生成（Safari 等でも互換性確保）
 const ensureAudioContext = () => {
@@ -130,12 +135,18 @@ const audioLevelLoop = () => {
     const rms = computeRms(obj.data);                      // 単発 RMS
     obj.history.push(rms);                                 // 履歴蓄積
     if (obj.history.length > rmsHistoryLength) obj.history.shift();
-    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length; // 移動平均
+    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length; // 移動平均RMS
     const prev = obj.speaking;
     let next = prev;
-    // 二重閾値で ON/OFF 判定安定化
+    // ① RMS 二重閾値判定
     if (!prev && avg >= speakingThresholdOn) next = true;
     else if (prev && avg < speakingThresholdOff) next = false;
+    // ② VAD 補強判定（ローカルメンバーのみ対象）
+    if (localMember.value && memberId === localMember.value.id) {
+      if (!next && latestVadValue.value >= vadSpeakingThreshold) {
+        next = true; // RMS低いが VAD 高い → 発話中と補正
+      }
+    }
     if (next !== prev) {
       obj.speaking = next;
       updateSpeakingVisual(memberId, next);                // 変化時のみ DOM 更新
@@ -288,17 +299,79 @@ const toggleBackgroundBlur = async () => {
   return enableBackgroundBlur();
 };
 
-// マイク取得時にブラウザ標準のノイズ抑制などを有効化
-const Noise_Suppression= (deviceId) => {
+
+const Noise_Suppression = async (deviceId) => {
+  // ① ブラウザ標準オプション（RNNoise失敗時フォールバック用）
+  //    SkyWay の createMicrophoneAudioStream にも渡す形を揃える
   const audioConstraints = {
-    noiseSuppression: true,  //背景ノイズ（キーボード音、PCファン、風切り音など）を軽減する
-    echoCancellation: true,  //エコー（ハウリング）を抑制する
-    autoGainControl: true //自動音量調整を有効にする
+    noiseSuppression: true,
+    echoCancellation: true,
+    autoGainControl: true,
+    ...(deviceId ? { deviceId } : {})
   };
-  if (deviceId) {
-    audioConstraints.deviceId = deviceId;
+  // SkyWay へ渡す & getUserMedia 用の共通 constraints
+  const constraints = { audio: audioConstraints };
+
+  try {
+  
+    // ② AudioContext 作成（Worklet, Graph の土台）
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    
+    // ③ RNNoise Worklet モジュール登録（public/ 配下はルート配信）
+    await audioContext.audioWorklet.addModule('/rnnoise-processor.js');
+
+    // ④ RNNoise WASM ロード & DenoiseState 生成（frameSize 把握）
+    const rn = await Rnnoise.load();
+    const denoiseState = rn.createDenoiseState(); // processFrame(frame) で in-place ノイズ抑制
+
+    // ⑤ 生マイク MediaStream 取得（指定 deviceId 反映済み）
+    const rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    // ⑥ MediaStream → AudioNode 化（Worklet 接続準備）
+    const inputSourceNode = audioContext.createMediaStreamSource(rawStream);
+
+    // ⑦ RNNoise AudioWorkletNode 生成（frameSize/VAD間隔を processorOptions で渡す）
+    const rnnoiseNode = new AudioWorkletNode(audioContext, 'rnnoise-processor', {
+      processorOptions: {
+        denoiseState,            // RNNoise 状態オブジェクト
+        frameSize: rn.frameSize, // フレームサイズ（通常480）
+        vadInterval: 10          // VAD通知間隔（フレーム数）
+      }
+    });
+    // 任意: VAD 値受信（話者検出等へ利用したい場合）
+    rnnoiseNode.port.onmessage = (ev) => {
+      if (ev.data?.type === 'vad') {
+        latestVadValue.value = ev.data.value; // 最新VAD値更新（RMS低いケース補強）
+      }
+    };
+
+
+    // ⑧ 出力 MediaStream ノード（SkyWay publish 用 Track 抽出先）
+    const outputDestinationNode = audioContext.createMediaStreamDestination();
+  
+    // ⑨ AudioGraph 構築: マイク → RNNoise → 出力
+    inputSourceNode.connect(rnnoiseNode).connect(outputDestinationNode);
+   
+    // ⑩ ノイズ抑制後 Track 取得（null フォールバック考慮）
+    const denoisedTrack = outputDestinationNode.stream.getAudioTracks()[0] || null;
+
+    // ⑪ 後始末用 cleanup（切替/退出時に呼び出し）
+    //     DenoiseState の destroy を忘れると WASM メモリリーク
+    const cleanup = () => {
+      try { inputSourceNode.disconnect(); } catch {}
+      try { rnnoiseNode.disconnect(); } catch {}
+      try { denoiseState.destroy(); } catch {}
+      try { audioContext.close(); } catch {}
+      try { rawStream.getTracks().forEach(t => t.stop()); } catch {}
+    };
+
+    return { constraints, denoisedTrack, cleanup };
+  } catch (e) {
+    console.warn('RNNoise 初期化/接続失敗。フォールバックします:', e);
+    // 失敗時は標準処理（ブラウザネイティブDSP）に任せる
+    return { constraints, denoisedTrack: null, cleanup: () => {} };
   }
-  return { audio: audioConstraints };
 };
 
 // 🆕 SkyWay API でデバイス一覧を取得
@@ -577,6 +650,14 @@ const toggleVideoMute = async () => {
 
   if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
+// RNNoise ON/OFF トグル（参加中であれば即時再適用）
+const toggleRnnoise = async () => {
+  isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
+  if (joined.value) {
+    await changeAudioInput();
+    toast.success(`RNNoiseを${isRnnoiseEnabled.value ? '有効化' : '無効化'}しました`);
+  }
+};
 //画面共有
 const screenShare = async () => {
   if (!localMember.value) return;
@@ -638,10 +719,28 @@ const changeAudioInput = async () => {
       localAudioStream.value.release?.();
     }
     
-    // 🆕 SkyWay API で選択されたデバイスのストリームを作成
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
-      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
-    );
+    // 新しいマイクストリーム生成（RNNoise 使用有無で分岐）
+    const ns = isRnnoiseEnabled.value
+      ? await Noise_Suppression(selectedAudioInputId.value)
+      : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
+    let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(ns.constraints);
+    if (ns.denoisedTrack) {
+      // 安全な差し替え: MediaStream から旧トラック除去 → 停止 → 新規追加
+      try {
+        const originalTrack = audioStream.track;
+        if (audioStream.mediaStream) {
+          audioStream.mediaStream.removeTrack(originalTrack);
+          originalTrack?.stop?.();
+          audioStream.mediaStream.addTrack(ns.denoisedTrack);
+          audioStream.track = ns.denoisedTrack;
+        } else {
+          originalTrack?.stop?.();
+          audioStream.track = ns.denoisedTrack; // 最低限のフォールバック
+        }
+      } catch (e) {
+        console.warn('RNNoise track 差し替え失敗 (fallback使用):', e);
+      }
+    }
     localAudioStream.value = audioStream;
     
     const audioPub = await localMember.value.publish(audioStream);
@@ -804,12 +903,29 @@ const joinRoom = async () => {
       roomMembers: context.room.members.map(m => m.id)
     });
 
-    // ローカルカメラ映像 (音声含めたければ別メソッドも可)
+    // ローカルカメラ映像
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
-    // ローカルの映像・音声ストリームを作成して publish（重要）
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
-      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
-    );
+    // 音声: RNNoise 有効ならノイズ抑制 / 無効なら通常マイク
+    const nsJoin = isRnnoiseEnabled.value
+      ? await Noise_Suppression(selectedAudioInputId.value)
+      : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
+    let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(nsJoin.constraints);
+    if (nsJoin.denoisedTrack) {
+      try {
+        const originalTrack = audioStream.track;
+        if (audioStream.mediaStream) {
+          audioStream.mediaStream.removeTrack(originalTrack);
+          originalTrack?.stop?.();
+          audioStream.mediaStream.addTrack(nsJoin.denoisedTrack);
+          audioStream.track = nsJoin.denoisedTrack;
+        } else {
+          originalTrack?.stop?.();
+          audioStream.track = nsJoin.denoisedTrack;
+        }
+      } catch (e) {
+        console.warn('RNNoise track 差し替え失敗 (join fallback):', e);
+      }
+    }
     // 退出時に解放するため保持（追加）
     localVideoStream.value = videoStream;
     localAudioStream.value = audioStream;
@@ -1186,6 +1302,17 @@ onUnmounted(async () => {
           class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
         >
           {{ leaving ? 'Leaving...' : 'ルーム退出' }}
+        </button>
+        <button
+          v-if="joined"
+          @click="toggleRnnoise"
+          :class="[
+            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
+            isRnnoiseEnabled ? 'bg-purple-600 text-white hover:bg-purple-700 focus:ring-purple-400' : 'bg-purple-200 text-purple-900 hover:bg-purple-300 focus:ring-purple-300'
+          ]"
+          title="RNNoise ノイズ抑制の ON/OFF 切替"
+        >
+          ノイズ抑制: {{ isRnnoiseEnabled ? 'ON' : 'OFF' }}
         </button>
       </div>
 

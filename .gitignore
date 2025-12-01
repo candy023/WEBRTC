@@ -35,3 +35,9 @@ src/components/services/MediaStreamService.js
 src/components/services/RoomService.js
 src/components/services/VideoUIService.js
 src/components/utils/SkywayToken.js
+src/components/composables
+src/components/ControlsBar.vue
+src/components/DevicePanel.vue
+src/components/Lobby.vue
+src/components/LocalTile.vue
+src/components/RemoteTile.vue

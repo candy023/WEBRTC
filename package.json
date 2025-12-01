@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@skyway-sdk/room": "^1.15.1",
     "skyway-video-processors": "^1.0.3",
     "uuidv4": "^6.2.13",
