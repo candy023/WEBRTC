@@ -337,7 +337,8 @@ const Noise_Suppression = async (deviceId) => {
     // ⑦ RNNoise AudioWorkletNode 生成（frameSize/VAD間隔を processorOptions で渡す）
     const rnnoiseNode = new AudioWorkletNode(audioContext, 'rnnoise-processor', {
       processorOptions: {
-        // NOTE: denoiseState は構造化クローン不可のため渡さない
+        // 修正: denoiseState は構造化クローン不可(DataCloneError)のため渡さない
+        // 参考: AudioWorkletNode の processorOptions は Structured Clone 必須
         frameSize: rn.frameSize,
         vadInterval: 10
       }
@@ -729,8 +730,8 @@ const changeAudioInput = async () => {
       ? await Noise_Suppression(selectedAudioInputId.value)
       : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
     let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(ns.constraints);
-    // NOTE: SkyWay の LocalMediaStreamBase は track が getter のため、
-    //       直接差し替えは行わない（発話検出は Worklet の VAD を利用）。
+    // 修正: SkyWay の LocalMediaStreamBase は track が getter のため差し替え不可
+    //       → 直接差し替えは行わない（VADはWorklet通知を使用）
     localAudioStream.value = audioStream;
     
     const audioPub = await localMember.value.publish(audioStream);
@@ -900,7 +901,7 @@ const joinRoom = async () => {
       ? await Noise_Suppression(selectedAudioInputId.value)
       : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
     let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(nsJoin.constraints);
-    // NOTE: join 時も track 差し替えは行わない。
+    // 修正: join 時も track 差し替えは行わない（forwarding失敗回避）
     // 退出時に解放するため保持（追加）
     localVideoStream.value = videoStream;
     localAudioStream.value = audioStream;
