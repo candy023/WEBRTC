@@ -22,12 +22,13 @@ class RnnoiseProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
 
-    // 1. RNNoise の動作パラメータを取り出す（名前付き引数コメントスタイル）
+    // 1. RNNoise の動作パラメータを安全に取り出す（options未指定でも動く）
+    const procOpts = (options && options.processorOptions) ? options.processorOptions : {};
     const {
-      denoiseState,          // RNNoise の状態オブジェクト（processFrameを提供）
-      frameSize = 480,       // フレームサイズ（RNNoise既定は480サンプル@48kHz）
-      vadInterval = 10,      // VAD通知間隔（このフレーム数ごとにpostMessage）
-    } = options.processorOptions ?? {};
+      denoiseState = null,   // 未指定ならパススルー動作
+      frameSize = 480,
+      vadInterval = 10,
+    } = procOpts;
     this.state = denoiseState;
     this.frameSize = frameSize;
     this.vadInterval = vadInterval;
