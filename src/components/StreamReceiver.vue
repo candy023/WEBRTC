@@ -5,6 +5,9 @@ import { BlurBackground } from 'skyway-video-processors'; // 追加: 背景ぼ�
 import GetToken from './SkywayToken.js';
 import { toast } from 'vue3-toastify';
 import "vue3-toastify/dist/index.css";
+// RNNoise の WebAssembly 版を読み込むためのライブラリ。
+// これを使うことで、ブラウザ上で RNNoise のノイズ除去アルゴリズムが動作する。
+import { Rnnoise } from "@shiguredo/rnnoise-wasm";
 
 // 環境変数 (vite)
 const appId = import.meta.env.VITE_SKYWAY_APP_ID;
@@ -31,6 +34,9 @@ const isVideoMuted = ref(false);
 // 画面共有状態管理（追加）
 const isScreenSharing = ref(false); 
 const isBackgroundBlurred = ref(false);
+// UI 折りたたみ/メニュー
+const showShareOpen = ref(false); // URL共有の折りたたみ
+const showSettingsOpen = ref(false); // 右上の設定メニュー
 // Vue の reactivity に巻き込まないため通常変数で保持（Proxy 化による WASM 例外回避）
 let backgroundProcessor = null;
 const baseUrl = window.location.href.split('?')[0];
@@ -46,20 +52,22 @@ const roomEventHandlers = { onStreamPublished: null };
 let deviceChangeHandler = null;
 
 
-// 目的:現在「話している」参加者の映像枠をリアルタイムに視覚的に強調表示する。
+// 目的: 現在「話している」参加者を映像枠のスタイルで強調表示する。
 // 手法概要:
-//   1. SkyWay の publish/subscribe 後に取得した audio MediaStreamTrack を
-//      Web Audio API (AudioContext + AnalyserNode) に接続。
-//   2. AnalyserNode の時間領域データ (getByteTimeDomainData) を取得し RMS(実効値) を計算。
-//   3. 直近 N 件の RMS の移動平均を取り、二重閾値 (ヒステリシス) を使って発話開始/終了判定。
-//      - 閾値を分離することで “ON/OFF が高速に揺れる” チャタリングを防止。
-//   4. 状態が変化したときのみ DOM の枠スタイル (outline / box-shadow) を更新。
+//   (A) RMSベース: AnalyserNode の時間領域データから移動平均RMSを算出し二重閾値で安定判定。
+//   (B) RNNoise VADベース: ローカル音声に限り RNNoise の VAD 値(0..1)を受信。
+//       → RMS が低くても VAD が十分高い場合は “話している” とみなす補強判定。
+//   (C) 判定結果が変化した時のみ DOM 更新し描画負荷を最小化。
+
 const audioContext = ref(null);            // 単一共有 AudioContext (必要時に遅延生成)
 let audioLevelAnimationId = null;          // rAF ループ用 ID （null なら未稼働）
 const speakerAnalyzers = new Map();        // memberId -> { analyser, data:Uint8Array, history:number[], speaking:boolean }
-const speakingThresholdOn = 0.04;          // 発話開始判定用 RMS 移動平均閾値
-const speakingThresholdOff = 0.02;         // 発話終了判定用閾値（オン時より低く設定し安定化）
+const speakingThresholdOn = 0.04;          // 発話開始 (RMS) 閾値
+const speakingThresholdOff = 0.02;         // 発話終了 (RMS) 閾値
 const rmsHistoryLength = 5;                // 移動平均に用いる履歴サンプル数
+const vadSpeakingThreshold = 0.6;          // VAD補強判定 閾値 (0..1)
+const latestVadValue = ref(0);             // RNNoise Worklet からの最新 VAD 値
+const isRnnoiseEnabled = ref(true);        // RNNoise ON/OFF トグル状態
 
 // AudioContext を必要になったタイミングで生成（Safari 等でも互換性確保）
 const ensureAudioContext = () => {
@@ -130,12 +138,18 @@ const audioLevelLoop = () => {
     const rms = computeRms(obj.data);                      // 単発 RMS
     obj.history.push(rms);                                 // 履歴蓄積
     if (obj.history.length > rmsHistoryLength) obj.history.shift();
-    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length; // 移動平均
+    const avg = obj.history.reduce((a, b) => a + b, 0) / obj.history.length; // 移動平均RMS
     const prev = obj.speaking;
     let next = prev;
-    // 二重閾値で ON/OFF 判定安定化
+    // ① RMS 二重閾値判定
     if (!prev && avg >= speakingThresholdOn) next = true;
     else if (prev && avg < speakingThresholdOff) next = false;
+    // ② VAD 補強判定（ローカルメンバーのみ対象）
+    if (localMember.value && memberId === localMember.value.id) {
+      if (!next && latestVadValue.value >= vadSpeakingThreshold) {
+        next = true; // RMS低いが VAD 高い → 発話中と補正
+      }
+    }
     if (next !== prev) {
       obj.speaking = next;
       updateSpeakingVisual(memberId, next);                // 変化時のみ DOM 更新
@@ -288,17 +302,80 @@ const toggleBackgroundBlur = async () => {
   return enableBackgroundBlur();
 };
 
-// マイク取得時にブラウザ標準のノイズ抑制などを有効化
-const Noise_Suppression= (deviceId) => {
+
+const Noise_Suppression = async (deviceId) => {
+  // ① ブラウザ標準オプション（RNNoise失敗時フォールバック用）
+  //    SkyWay の createMicrophoneAudioStream にも渡す形を揃える
   const audioConstraints = {
-    noiseSuppression: true,  //背景ノイズ（キーボード音、PCファン、風切り音など）を軽減する
-    echoCancellation: true,  //エコー（ハウリング）を抑制する
-    autoGainControl: true //自動音量調整を有効にする
+    noiseSuppression: true,
+    echoCancellation: true,
+    autoGainControl: true,
+    ...(deviceId ? { deviceId } : {})
   };
-  if (deviceId) {
-    audioConstraints.deviceId = deviceId;
+  // SkyWay へ渡す & getUserMedia 用の共通 constraints
+  const constraints = { audio: audioConstraints };
+
+  try {
+  
+    // ② AudioContext 作成（Worklet, Graph の土台）
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    
+    // ③ RNNoise Worklet モジュール登録（public/ 配下はルート配信）
+    await audioContext.audioWorklet.addModule('/rnnoise-processor.js');
+
+    // ④ RNNoise WASM ロード & DenoiseState 生成（frameSize 把握）
+    const rn = await Rnnoise.load();
+    const denoiseState = rn.createDenoiseState(); // processFrame(frame) で in-place ノイズ抑制
+
+    // ⑤ 生マイク MediaStream 取得（指定 deviceId 反映済み）
+    const rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    // ⑥ MediaStream → AudioNode 化（Worklet 接続準備）
+    const inputSourceNode = audioContext.createMediaStreamSource(rawStream);
+
+    // ⑦ RNNoise AudioWorkletNode 生成（frameSize/VAD間隔を processorOptions で渡す）
+    const rnnoiseNode = new AudioWorkletNode(audioContext, 'rnnoise-processor', {
+      processorOptions: {
+        // 修正: denoiseState は構造化クローン不可(DataCloneError)のため渡さない
+        // 参考: AudioWorkletNode の processorOptions は Structured Clone 必須
+        frameSize: rn.frameSize,
+        vadInterval: 10
+      }
+    });
+    // 任意: VAD 値受信（話者検出等へ利用したい場合）
+    rnnoiseNode.port.onmessage = (ev) => {
+      if (ev.data?.type === 'vad') {
+        latestVadValue.value = ev.data.value; // 最新VAD値更新（RMS低いケース補強）
+      }
+    };
+
+
+    // ⑧ 出力 MediaStream ノード（SkyWay publish 用 Track 抽出先）
+    const outputDestinationNode = audioContext.createMediaStreamDestination();
+  
+    // ⑨ AudioGraph 構築: マイク → RNNoise → 出力
+    inputSourceNode.connect(rnnoiseNode).connect(outputDestinationNode);
+   
+    // ⑩ ノイズ抑制後 Track 取得（null フォールバック考慮）
+    const denoisedTrack = outputDestinationNode.stream.getAudioTracks()[0] || null;
+
+    // ⑪ 後始末用 cleanup（切替/退出時に呼び出し）
+    //     DenoiseState の destroy を忘れると WASM メモリリーク
+    const cleanup = () => {
+      try { inputSourceNode.disconnect(); } catch {}
+      try { rnnoiseNode.disconnect(); } catch {}
+      try { denoiseState.destroy(); } catch {}
+      try { audioContext.close(); } catch {}
+      try { rawStream.getTracks().forEach(t => t.stop()); } catch {}
+    };
+
+    return { constraints, denoisedTrack, cleanup };
+  } catch (e) {
+    console.warn('RNNoise 初期化/接続失敗。フォールバックします:', e);
+    // 失敗時は標準処理（ブラウザネイティブDSP）に任せる
+    return { constraints, denoisedTrack: null, cleanup: () => {} };
   }
-  return { audio: audioConstraints };
 };
 
 // 🆕 SkyWay API でデバイス一覧を取得
@@ -400,7 +477,8 @@ const attachRemoteStream = (stream, publication) => {
 
     if (hasVideo) {
       const container = document.createElement('div');
-      container.className = 'relative inline-block';
+      // グリッド項目としてサイズを親に任せ、縦横比を維持
+      container.className = 'relative w-full aspect-video bg-black rounded overflow-hidden';
 
       // メンバーID付与（話者ハイライト用）
       if (publication?.publisher?.id) {
@@ -418,7 +496,8 @@ const attachRemoteStream = (stream, publication) => {
       const el = document.createElement('video');
       el.autoplay = true;
       el.playsInline = true;
-      el.className = 'w-96 h-72 object-cover rounded border';
+      // タイル内で全面表示（親が aspect-video を担保）
+      el.className = 'w-full h-full object-cover';
       container.appendChild(el);
 
       // 拡大ボタンを作成
@@ -577,6 +656,14 @@ const toggleVideoMute = async () => {
 
   if (!ok) console.warn('Video mute/unmute failed (no publication & no track)');
 };
+// RNNoise ON/OFF トグル（参加中であれば即時再適用）
+const toggleRnnoise = async () => {
+  isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
+  if (joined.value) {
+    await changeAudioInput();
+    toast.success(`RNNoiseを${isRnnoiseEnabled.value ? '有効化' : '無効化'}しました`);
+  }
+};
 //画面共有
 const screenShare = async () => {
   if (!localMember.value) return;
@@ -638,10 +725,13 @@ const changeAudioInput = async () => {
       localAudioStream.value.release?.();
     }
     
-    // 🆕 SkyWay API で選択されたデバイスのストリームを作成
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
-      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
-    );
+    // 新しいマイクストリーム生成（RNNoise 使用有無で分岐）
+    const ns = isRnnoiseEnabled.value
+      ? await Noise_Suppression(selectedAudioInputId.value)
+      : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
+    let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(ns.constraints);
+    // 修正: SkyWay の LocalMediaStreamBase は track が getter のため差し替え不可
+    //       → 直接差し替えは行わない（VADはWorklet通知を使用）
     localAudioStream.value = audioStream;
     
     const audioPub = await localMember.value.publish(audioStream);
@@ -804,12 +894,14 @@ const joinRoom = async () => {
       roomMembers: context.room.members.map(m => m.id)
     });
 
-    // ローカルカメラ映像 (音声含めたければ別メソッドも可)
+    // ローカルカメラ映像
     const videoStream = await SkyWayStreamFactory.createCameraVideoStream();
-    // ローカルの映像・音声ストリームを作成して publish（重要）
-    const audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(
-      Noise_Suppression(selectedAudioInputId.value) // ノイズ抑制等を有効化
-    );
+    // 音声: RNNoise 有効ならノイズ抑制 / 無効なら通常マイク
+    const nsJoin = isRnnoiseEnabled.value
+      ? await Noise_Suppression(selectedAudioInputId.value)
+      : { constraints: { audio: { deviceId: selectedAudioInputId.value } }, denoisedTrack: null, cleanup: () => {} };
+    let audioStream = await SkyWayStreamFactory.createMicrophoneAudioStream(nsJoin.constraints);
+    // 修正: join 時も track 差し替えは行わない（forwarding失敗回避）
     // 退出時に解放するため保持（追加）
     localVideoStream.value = videoStream;
     localAudioStream.value = audioStream;
@@ -835,7 +927,8 @@ const joinRoom = async () => {
     // ローカル video 要素
     // ローカル映像用コンテナ（追加）
     const localContainer = document.createElement('div');
-    localContainer.className = 'relative inline-block';
+    // ローカルも同じタイル仕様に統一
+    localContainer.className = 'relative w-full aspect-video bg-black rounded overflow-hidden';
     streamArea.value.appendChild(localContainer);
 
     // DOM 変数名を ref と衝突させないよう localVideoElement と命名
@@ -843,7 +936,7 @@ const joinRoom = async () => {
     localVideoElement.muted = true;
     localVideoElement.playsInline = true;
     localVideoElement.autoplay = true;
-    localVideoElement.className = 'w-96 h-72 object-cover rounded border';
+    localVideoElement.className = 'w-full h-full object-cover';
     localContainer.appendChild(localVideoElement);
 
     // 自分のメンバーID付与
@@ -1148,197 +1241,89 @@ onUnmounted(async () => {
 </script>
 
 <template>
-  <div class="p-4 space-y-6">
-        <!-- 拡大表示中の縮小用オーバーレイ（追加） -->
-    <div 
-      v-if="enlargedVideo" 
-      @click="shrinkVideo"
-      class="fixed inset-0 bg-transparent z-40 cursor-pointer"
-      title="クリックして元のサイズに戻す"
-    ></div>
+  <div class="p-4 space-y-4">
+    <!-- 拡大表示中の縮小用オーバーレイ -->
+    <div v-if="enlargedVideo" @click="shrinkVideo" class="fixed inset-0 bg-transparent z-40 cursor-pointer" />
 
-    <h1 class="text-2xl font-bold">会議</h1>
+    <!-- ツールバー（上部固定） -->
+    <header class="sticky top-0 z-30 bg-white/90 backdrop-blur px-3 py-2 shadow-sm">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <!-- 左: ルーム制御 -->
+        <div class="flex items-center gap-2">
+          <button v-if="!roomCreated" @click="createRoom" class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm hover:bg-blue-700">＋作成</button>
+          <button v-if="roomId && !joined" :disabled="joining || leaving" @click="joinRoom" class="px-3 py-1.5 rounded bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">{{ joining ? '参加中…' : '参加' }}</button>
+          <button v-if="joined" :disabled="leaving" @click="leaveRoom" class="px-3 py-1.5 rounded bg-gray-600 text-white text-sm hover:bg-gray-700 disabled:opacity-50">{{ leaving ? '退出中…' : '退出' }}</button>
+        </div>
 
-    <div class="flex gap-4 flex-wrap">
-      <!-- ボタンエリア -->
-      <div class="space-x-2">
-        <button
-          v-if="!roomCreated"
-          @click="createRoom"
-          class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 active:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
-        >
-          ルーム作成
-        </button>
+        <!-- 中央: メディア操作（参加時のみ） -->
+        <div v-if="joined" class="flex items-center gap-2">
+          <button @click="toggleAudioMute" :title="isAudioMuted ? 'ミュート解除' : 'ミュート'" :class="['px-3 py-1.5 rounded text-sm', isAudioMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">ミュート🎤</button>
+          <button @click="toggleVideoMute" :title="isVideoMuted ? '映像ON' : '映像OFF'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">映像📹</button>
+          <button @click="screenShare" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
+          <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">ぼかし🟣</button>
+          <button @click="toggleRnnoise" :title="'ノイズ抑制(RNNoise)'" :class="['px-3 py-1.5 rounded text-sm', isRnnoiseEnabled ? 'bg-purple-600 text-white' : 'bg-purple-200 text-purple-900']">ノイズ抑制</button>
+        </div>
 
-        <button
-          v-if="roomId && !joined"
-          :disabled="joining || leaving"  
-          @click="joinRoom"
-          class="inline-flex items-center px-4 py-2 rounded bg-green-600 text-white font-medium hover:bg-green-700 active:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-50"
-        >
-          {{ joining ? 'Joining...' : 'ルーム参加' }}
-        </button>
-
-         <button
-          v-if="joined"
-          :disabled="leaving"            
-          @click="leaveRoom"
-          class="inline-flex items-center px-4 py-2 rounded bg-gray-600 text-white font-medium hover:bg-gray-700 active:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-400 disabled:opacity-50"
-        >
-          {{ leaving ? 'Leaving...' : 'ルーム退出' }}
-        </button>
+        <!-- 右: 設定メニュー -->
+        <div class="relative">
+          <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">⋮</button>
+          <div v-if="showSettingsOpen" class="absolute right-0 mt-2 w-48 bg-white border rounded shadow z-40">
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openCameraPanel(); showSettingsOpen=false">カメラ切替</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openMicPanel(); showSettingsOpen=false">マイク切替</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openSpeakerPanel(); showSettingsOpen=false">スピーカー切替</button>
+          </div>
+        </div>
       </div>
+      <div v-if="errorMessage" class="mt-2 text-xs text-red-600">{{ errorMessage }}</div>
+    </header>
 
-      <div v-if="errorMessage" class="text-sm text-red-600 font-medium">
-        {{ errorMessage }}
+    <!-- デバイス選択パネル（ボタンは設定メニューから開く） -->
+    <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
+      <div class="flex items-center gap-2">
+        <select v-model="tempSelectedVideoInputId" class="px-3 py-2 rounded border text-sm">
+          <option v-for="d in videoInputDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || d.deviceId }}</option>
+        </select>
+        <button @click="confirmCameraPanel" class="px-3 py-1 bg-green-600 text-white rounded text-sm">確定</button>
+        <button @click="cancelCameraPanel" class="px-3 py-1 bg-gray-300 rounded text-sm">キャンセル</button>
+      </div>
+    </div>
+    <div v-if="showMicPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
+      <div class="flex items-center gap-2">
+        <select v-model="tempSelectedAudioInputId" class="px-3 py-2 rounded border text-sm">
+          <option v-for="d in audioInputDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || d.deviceId }}</option>
+        </select>
+        <button @click="confirmMicPanel" class="px-3 py-1 bg-green-600 text-white rounded text-sm">確定</button>
+        <button @click="cancelMicPanel" class="px-3 py-1 bg-gray-300 rounded text-sm">キャンセル</button>
+      </div>
+    </div>
+    <div v-if="showSpeakerPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
+      <div class="flex items-center gap-2">
+        <select v-model="tempSelectedAudioOutputId" class="px-3 py-2 rounded border text-sm">
+          <option v-for="d in audioOutputDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || d.deviceId }}</option>
+        </select>
+        <button @click="confirmSpeakerPanel" class="px-3 py-1 bg-green-600 text-white rounded text-sm">確定</button>
+        <button @click="cancelSpeakerPanel" class="px-3 py-1 bg-gray-300 rounded text-sm">キャンセル</button>
       </div>
     </div>
 
-    <!-- ミュートボタン（新規追加） -->
-    <div v-if="joined" class="space-x-2">
-        <!-- 音声ミュートボタン -->
-        <button
-          @click="toggleAudioMute"
-          :class="[
-            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            isAudioMuted 
-              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
-              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
-          ]"
-        >
-          {{ isAudioMuted ? '🔇 ミュート中' : '🎤 音声ON' }}
-        </button>
-
-        <!-- 映像ミュートボタン -->
-        <button
-          @click="toggleVideoMute"
-          :class="[
-            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            isVideoMuted 
-              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400' 
-              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
-          ]"
-        >
-          {{ isVideoMuted ? '📹 映像OFF' : '📹 映像ON' }}
-        </button>
-        <!--画面共有ボタン-->
-        <button
-          @click="screenShare"
-          :class="[
-            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            isScreenSharing
-              ? 'bg-red-600 text-white hover:bg-red-700 focus:ring-red-400'
-              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
-          ]"
-        >
-          {{ isScreenSharing ? '🖥️ 画面共有中' : '🖥️ 画面共有' }}
-        </button>
-
-        <!-- 背景ぼかしボタン -->
-        <button
-          @click="toggleBackgroundBlur"
-          :class="[
-            'inline-flex items-center px-4 py-2 rounded font-medium focus:outline-none focus:ring-2',
-            isBackgroundBlurred
-              ? 'bg-purple-600 text-white hover:bg-purple-700 focus:ring-purple-400'
-              : 'bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400'
-          ]"
-        >
-          {{ isBackgroundBlurred ? '🟣 背景ぼかしON' : '🟣 背景ぼかし' }}
-        </button>
-      </div>
-
-      <!-- カメラ / マイク 切替 UI -->
-      <div v-if="joined" class="space-x-2 mt-3 flex items-center flex-wrap">
-        <!-- カメラ切替 -->
-        <div class="flex items-center space-x-2">
-          
-          <button
-            @click="openCameraPanel"
-            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
-          >
-            カメラ切り替え
-          </button>
-          <!-- Camera panel -->
-          <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
-            <div class="flex items-center space-x-2">
-              <select v-model="tempSelectedVideoInputId" class="px-3 py-2 rounded border text-sm">
-                <option v-for="d in videoInputDevices" :key="d.deviceId" :value="d.deviceId">
-                  {{ d.label || d.deviceId }}
-                </option>
-              </select>
-              <button @click="confirmCameraPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
-              <button @click="cancelCameraPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- マイク切替 -->
-        <div class="flex items-center space-x-2 ml-4">
-          <label class="text-sm"></label>
-          <button
-            @click="openMicPanel"
-            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
-          >
-            マイク切り替え
-          </button>
-          <!-- Mic panel -->
-          <div v-if="showMicPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
-            <div class="flex items-center space-x-2">
-              <select v-model="tempSelectedAudioInputId" class="px-3 py-2 rounded border text-sm">
-                <option v-for="d in audioInputDevices" :key="d.deviceId" :value="d.deviceId">
-                  {{ d.label || d.deviceId }}
-                </option>
-              </select>
-              <button @click="confirmMicPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
-              <button @click="cancelMicPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- スピーカー(音声出力)切替 -->
-        <div class="flex items-center space-x-2 ml-4">
-         
-          <button
-            @click="openSpeakerPanel"
-            class="inline-flex items-center px-4 py-2 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 focus:outline-none focus:ring-2"
-          >
-            スピーカー切り替え
-          </button>
-          <!-- Speaker panel -->
-          <div v-if="showSpeakerPanel" class="mt-2 p-3 bg-white border rounded shadow-lg absolute z-50">
-            <div class="flex items-center space-x-2">
-              <select v-model="tempSelectedAudioOutputId" class="px-3 py-2 rounded border text-sm">
-                <option v-for="d in audioOutputDevices" :key="d.deviceId" :value="d.deviceId">
-                  {{ d.label || d.deviceId }}
-                </option>
-              </select>
-              <button @click="confirmSpeakerPanel" class="px-3 py-1 bg-green-600 text-white rounded">確定</button>
-              <button @click="cancelSpeakerPanel" class="px-3 py-1 bg-gray-300 rounded">キャンセル</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-    <!-- ルーム情報表示 -->
+    <!-- URL共有（折りたたみ） -->
     <div v-if="roomId" class="space-y-2 text-sm">
-      <p>以下のURLを相手と共有:</p>
-      <p class="break-all font-mono bg-gray-100 px-2 py-1 rounded">
-        {{ baseUrl }}?room={{ roomId }}
-      </p>
-      <p>またはルームID:</p>
-      <p class="font-mono bg-gray-100 px-2 py-1 inline-block rounded">{{ roomId }}</p>
+      <button @click="showShareOpen = !showShareOpen" class="px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 text-sm">URL共有 {{ showShareOpen ? '▲' : '▼' }}</button>
+      <div v-if="showShareOpen" class="space-y-2">
+        <p class="text-xs text-gray-600">以下のURLを相手と共有:</p>
+        <p class="break-all font-mono bg-gray-100 px-2 py-1 rounded">{{ baseUrl }}?room={{ roomId }}</p>
+        <p class="text-xs text-gray-600">またはルームID:</p>
+        <p class="font-mono bg-gray-100 px-2 py-1 inline-block rounded">{{ roomId }}</p>
+      </div>
     </div>
 
-    <!-- 映像表示エリア -->
+    <!-- 映像表示エリア（固定高 + 内側スクロール、グリッド） -->
     <div
       ref="streamArea"
       v-if="roomCreated"
-      class="flex gap-4 flex-wrap border rounded p-3 min-h-[200px]"
-    ></div>
-
-    <div v-else class="text-gray-500 italic">
-      まだルームは作成されていません。
-    </div>
+      class="border rounded p-3 max-h-[65vh] overflow-y-auto"
+      style="display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;"
+    />
+    <div v-else class="text-gray-500 italic">まだルームは作成されていません。</div>
   </div>
 </template>
