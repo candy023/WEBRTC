@@ -29,15 +29,9 @@ dist-ssr
 First.js
 useMediaControl.js
 useRoomControl.js
-src/components/WebRTC_UI.vue
-src/components/composables/useSkywayRoom.js
-src/components/services/MediaStreamService.js
-src/components/services/RoomService.js
-src/components/services/VideoUIService.js
-src/components/utils/SkywayToken.js
-src/components/composables
-src/components/ControlsBar.vue
-src/components/DevicePanel.vue
-src/components/Lobby.vue
-src/components/LocalTile.vue
-src/components/RemoteTile.vue
+# src/components/WebRTC_UI.vue
+# src/components/composables/useSkywayRoom.js
+# src/services
+# src/composables
+src/components/services
+src/components/utils
