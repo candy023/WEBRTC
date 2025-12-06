@@ -71,7 +71,11 @@ export function useStreamReceiver() {
   const localVideoPublication = ref(null);   // 自分の映像 Publication
   const localAudioPublication = ref(null);   // 自分の音声 Publication
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
-  let onStreamHandler = null;                // onStreamPublished の解除用ハンドラ
+  // 配信通知ハンドラ参照（onStreamPublished の解除に使う）
+  // 変数名: `streamPublishedHandler` に統一して何のハンドラか明示する
+  let streamPublishedHandler = null;
+  // 受信済み publication の ID を記録（重複 subscribe 防止用）
+  const receivedPublicationIds = new Set();
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
 
@@ -100,7 +104,34 @@ export function useStreamReceiver() {
 
     try {
       if (!roomCreated.value || !context.room) await createRoom();
+      // 1) 先に onStreamPublished を登録（join 前に他人が配信開始しても取りこぼさない）
+      //    ハンドラ内で join 未完了時は受信処理をスキップする（join 後に改めて既存配信を受信開始するため問題ない）
+      if (!streamPublishedHandler) {
+        const handler = async (stream, pub) => {
+          try {
+            // join 完了前に配信通知が来た場合はスキップ
+            // （join 後に改めて既存配信を subscribe するため問題ない）
+            if (!localMember.value) return;
 
+            // 自分の配信は subscribe しない（echo back 防止）
+            if (pub?.publisher?.id && localMember.value?.id && pub.publisher.id === localMember.value.id) return;
+
+            // 受信済み publication の重複処理を防止
+            if (receivedPublicationIds.has(pub.id)) return;
+            receivedPublicationIds.add(pub.id);
+
+            // 他人の配信を受信開始
+            attachRemoteStream(streamArea.value, stream, pub);
+            remoteVideos.value.push(streamArea.value?.lastElementChild || null);
+          } catch (err) {
+            console.warn('配信の受信処理に失敗:', err);
+          }
+        };
+        // サービス側の bind を使って配信通知の登録を行う（member 引数は後からでも扱える実装を想定）
+        streamPublishedHandler = bindOnStreamPublished(context.room, null, handler);
+      }
+
+      // 2) その後で join（member を確定）
       const member = await skywayJoin(context.room);
       localMember.value = member;
 
@@ -145,17 +176,16 @@ export function useStreamReceiver() {
         }
       } catch {}
 
-      // すでに存在しているリモート publish をすべて購読
+      // join 前から配信している他人の映像・音声を受信開始（自分の配信は除外）
       await subscribeExisting(context.room, localMember.value, (stream, pub) => {
+        // 受信済みの場合はスキップ（重複 subscribe 回避）
+        if (receivedPublicationIds.has(pub.id)) return;
+        receivedPublicationIds.add(pub.id);
         const el = attachRemoteStream(streamArea.value, stream, pub);
         remoteVideos.value.push(el);
       });
 
-      // これから追加される publish をリアルタイムで購読
-      onStreamHandler = bindOnStreamPublished(context.room, member, (stream, pub) => {
-        const el = attachRemoteStream(streamArea.value, stream, pub);
-        remoteVideos.value.push(el);
-      });
+      // 既に事前登録済みのため、ここで改めて再登録はしない（重複防止）
 
     } catch (e) {
       errorMessage.value = e?.message || String(e);
@@ -176,8 +206,8 @@ export function useStreamReceiver() {
         audioPub: localAudioPublication.value
       });
 
-      if (onStreamHandler) unbindOnStreamPublished(context.room, onStreamHandler);
-      onStreamHandler = null;
+      if (streamPublishedHandler) unbindOnStreamPublished(context.room, streamPublishedHandler);
+      streamPublishedHandler = null;
 
       remoteVideos.value.forEach(el => { try { el.remove(); } catch {} });
       remoteVideos.value = [];
