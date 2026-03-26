@@ -23,6 +23,7 @@ const {
   cameraFilmstripTiles,
   // ローカルプレビューの video 要素。UI が直接 DOM 参照を持つ理由は、サービス側で attach するため
   localVideoEl,
+  localSelfCameraPreviewEl,
   leaving,
   // ミュート・共有・背景ぼかしなど UI 表示用フラグ。実際のトグル処理はサービス側で行うためここでは同期表示用途に限定
   isAudioMuted,
@@ -176,9 +177,12 @@ const mountTileElement = (host, tile, mode = 'camera') => {
     </div>
 
     <div v-if="roomCreated" class="space-y-4 md:space-y-5">
-      <div class="border rounded p-2 md:p-3 bg-gray-50">
+      <div class="border rounded p-2 md:p-3 bg-gray-50 relative">
         <div v-if="selectedMainShareTile" class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
         <div v-else class="w-full aspect-video rounded bg-gray-100 text-gray-500 text-sm flex items-center justify-center">共有中の画面はありません。</div>
+        <div v-if="joined && isScreenSharing" class="absolute bottom-3 right-3 z-10 w-28 md:w-40 lg:w-44 aspect-video rounded overflow-hidden bg-black border border-white/40 shadow">
+          <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
+        </div>
       </div>
 
       <div v-if="screenShareTiles.length > 1" class="space-y-2">
