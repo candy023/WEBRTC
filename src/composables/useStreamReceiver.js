@@ -30,11 +30,11 @@ import {
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
 import { enumerateDevices, getDefaultSelections } from '../services/DeviceService.js';
-import { attachRemoteStream, enlargeVideo as uiEnlarge, shrinkVideo as uiShrink } from '../services/VideoUIService.js';
+import { attachRemoteStream, setRemoteAudioOutput, enlargeVideo as uiEnlarge, shrinkVideo as uiShrink } from '../services/VideoUIService.js';
 
 export function useStreamReceiver() {
 
-  // --- UI 側と直接バインドされる 상태（状態管理の中核） ---
+  // --- UI 側と直接バインドされる状態（状態管理の中核） ---
   const streamArea = ref(null);              // リモート映像タイルを挿入する DOM コンテナ
   const roomCreated = ref(false);            // ルーム作成済みかどうか
   const roomId = ref('');                    // ルーム識別子（URL・検索のキー）
@@ -70,15 +70,56 @@ export function useStreamReceiver() {
   // --- 内部制御用（UI には直接返さない） ---
   const localVideoPublication = ref(null);   // 自分の映像 Publication
   const localAudioPublication = ref(null);   // 自分の音声 Publication
+  const localVideoStream = ref(null);        // ローカル映像ストリーム参照
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
-  // 配信通知ハンドラ参照（onStreamPublished の解除に使う）
-  // 変数名: `streamPublishedHandler` に統一して何のハンドラか明示する
-  let streamPublishedHandler = null;
-  // 受信済み publication の ID を記録（重複 subscribe 防止用）
-  const receivedPublicationIds = new Set();
+  let streamPublishedHandler = null;         // onStreamPublished の解除に使うハンドラ参照
+  const receivedPublicationIds = new Set();  // 受信済み publication の ID を記録（重複 subscribe 防止）
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
 
+  const releaseLocalVideoStream = () => {
+    try {
+      localVideoStream.value?.release?.();
+    } catch {}
+    localVideoStream.value = null;
+  };
+
+  const unpublishCurrentVideo = async () => {
+    try {
+      if (localMember.value && localVideoPublication.value) {
+        await localMember.value.unpublish(localVideoPublication.value);
+      }
+    } catch {}
+    localVideoPublication.value = null;
+  };
+
+  const attachLocalPreview = (stream) => {
+    try {
+      if (!stream || !localVideoEl.value) return;
+      stream.attach(localVideoEl.value);
+      localVideoEl.value.play?.().catch(() => {});
+    } catch {}
+  };
+
+  const reflectInitialMuteState = async () => {
+    try {
+      if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
+    } catch {}
+    try {
+      if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
+    } catch {}
+  };
+
+  const attachRemote = async (stream, pub) => {
+    if (!pub?.id) return;
+    if (receivedPublicationIds.has(pub.id)) return;
+    receivedPublicationIds.add(pub.id);
+
+    const el = attachRemoteStream(streamArea.value, stream, pub, {
+      audioOutputDeviceId: selectedAudioOutputId.value
+    });
+    if (el) remoteVideos.value.push(el);
+  };
 
   // ルームを作成し、URL 共有の起点を確定する
   const createRoom = async () => {
@@ -90,12 +131,9 @@ export function useStreamReceiver() {
       context.ctx = await createContext();
     }
 
-    // 既存ルームがあれば取得、なければ新規作成して参加対象のルームを確定する
     context.room = await findOrCreateRoom(context.ctx, roomId.value);
-
     roomCreated.value = true;
   };
-
 
   // ルームに参加し、ローカル publish とリモート subscribe をまとめて行う
   const joinRoom = async () => {
@@ -104,55 +142,43 @@ export function useStreamReceiver() {
 
     try {
       if (!roomCreated.value || !context.room) await createRoom();
-      // 1) 先に onStreamPublished を登録（join 前に他人が配信開始しても取りこぼさない）
-      //    ハンドラ内で join 未完了時は受信処理をスキップする（join 後に改めて既存配信を受信開始するため問題ない）
-      if (!streamPublishedHandler) {
-        const handler = async (stream, pub) => {
-          try {
-            // join 完了前に配信通知が来た場合はスキップ
-            // （join 後に改めて既存配信を subscribe するため問題ない）
-            if (!localMember.value) return;
+      receivedPublicationIds.clear();
 
-            // 自分の配信は subscribe しない（echo back 防止）
-            if (pub?.publisher?.id && localMember.value?.id && pub.publisher.id === localMember.value.id) return;
-
-            // 受信済み publication の重複処理を防止
-            if (receivedPublicationIds.has(pub.id)) return;
-            receivedPublicationIds.add(pub.id);
-
-            // 他人の配信を受信開始
-            attachRemoteStream(streamArea.value, stream, pub);
-            remoteVideos.value.push(streamArea.value?.lastElementChild || null);
-          } catch (err) {
-            console.warn('配信の受信処理に失敗:', err);
-          }
-        };
-        // サービス側の bind を使って配信通知の登録を行う（member 引数は後からでも扱える実装を想定）
-        streamPublishedHandler = bindOnStreamPublished(context.room, null, handler);
-      }
-
-      // 2) その後で join（member を確定）
       const member = await skywayJoin(context.room);
       localMember.value = member;
 
-      // カメラ映像のストリームを生成
+      if (streamPublishedHandler) {
+        unbindOnStreamPublished(context.room, streamPublishedHandler);
+        streamPublishedHandler = null;
+      }
+
+      streamPublishedHandler = bindOnStreamPublished(
+        context.room,
+        member,
+        async (stream, pub) => {
+          try {
+            if (pub?.publisher?.id && member?.id && pub.publisher.id === member.id) return;
+            await attachRemote(stream, pub);
+          } catch (err) {
+            console.warn('配信の受信処理に失敗:', err);
+          }
+        }
+      );
+
       const videoStream = await createCameraStream(
         selectedVideoInputId.value
           ? { video: { deviceId: selectedVideoInputId.value } }
           : undefined
       );
+      localVideoStream.value = videoStream;
 
-      // マイク音声の制約を作成（RNNoise 有効時は上書き）
       let audioConstraints = { audio: { deviceId: selectedAudioInputId.value || undefined } };
-
       if (isRnnoiseEnabled.value) {
         rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value);
         audioConstraints = rnnoiseHandle.constraints;
       }
 
       const audioStream = await createMicrophoneStream(audioConstraints);
-
-      // 映像・音声を SkyWay に publish する
       const pubs = await publishLocal(member, {
         videoStream,
         audioStream
@@ -161,31 +187,29 @@ export function useStreamReceiver() {
       localVideoPublication.value = pubs.videoPub;
       localAudioPublication.value = pubs.audioPub;
 
-      // 現在のミュート状態を publish 後に反映
-      try { if (isVideoMuted.value) await localVideoPublication.value?.disable?.(); } catch {}
-      try { if (isAudioMuted.value) await localAudioPublication.value?.disable?.(); } catch {}
-
-      // ローカルプレビューへ映像を反映
       joined.value = true;
       await nextTick();
 
-      try {
-        if (localVideoEl.value) {
-          videoStream.attach(localVideoEl.value);
-          localVideoEl.value.play?.().catch(() => {});
-        }
-      } catch {}
+      attachLocalPreview(localVideoStream.value);
+      await reflectInitialMuteState();
 
-      // join 前から配信している他人の映像・音声を受信開始（自分の配信は除外）
-      await subscribeExisting(context.room, localMember.value, (stream, pub) => {
-        // 受信済みの場合はスキップ（重複 subscribe 回避）
-        if (receivedPublicationIds.has(pub.id)) return;
-        receivedPublicationIds.add(pub.id);
-        const el = attachRemoteStream(streamArea.value, stream, pub);
-        remoteVideos.value.push(el);
+      if (isBackgroundBlurred.value && !isScreenSharing.value) {
+        const ret = await enableBackgroundBlur({
+          localMember,
+          localVideoPublication,
+          localVideoStream,
+          localVideoEl
+        });
+        blurProcessor = ret?.processor ?? null;
+
+        try {
+          if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
+        } catch {}
+      }
+
+      await subscribeExisting(context.room, member, async (stream, pub) => {
+        await attachRemote(stream, pub);
       });
-
-      // 既に事前登録済みのため、ここで改めて再登録はしない（重複防止）
 
     } catch (e) {
       errorMessage.value = e?.message || String(e);
@@ -194,46 +218,48 @@ export function useStreamReceiver() {
     }
   };
 
-
   // ルーム退出およびすべてのリソース解放
   const leaveRoom = async () => {
     if (!joined.value || leaving.value) return;
     leaving.value = true;
 
     try {
+      if (streamPublishedHandler) unbindOnStreamPublished(context.room, streamPublishedHandler);
+      streamPublishedHandler = null;
+
       await skywayLeave(localMember.value, context.room, {
         videoPub: localVideoPublication.value,
         audioPub: localAudioPublication.value
       });
 
-      if (streamPublishedHandler) unbindOnStreamPublished(context.room, streamPublishedHandler);
-      streamPublishedHandler = null;
-
-      remoteVideos.value.forEach(el => { try { el.remove(); } catch {} });
+      remoteVideos.value.forEach(el => { try { el?.remove?.(); } catch {} });
       remoteVideos.value = [];
+      receivedPublicationIds.clear();
+
+      try { localVideoEl.value?.pause?.(); } catch {}
+      try {
+        if (localVideoEl.value) localVideoEl.value.srcObject = null;
+      } catch {}
+
+      releaseLocalVideoStream();
+
+      try {
+        await blurProcessor?.dispose?.();
+      } catch {}
+      blurProcessor = null;
+
+      try {
+        rnnoiseHandle?.cleanup?.();
+      } catch {}
+      rnnoiseHandle = null;
 
       joined.value = false;
+      isScreenSharing.value = false;
       localMember.value = null;
       localVideoPublication.value = null;
       localAudioPublication.value = null;
       roomCreated.value = false;
       context.room = null;
-
-      try { rnnoiseHandle?.cleanup?.(); rnnoiseHandle = null; } catch {}
-
-      try {
-        if (blurProcessor) {
-          await disableBackgroundBlur({
-            localMember,
-            localVideoPublication,
-            localVideoStream: ref(null),
-            localVideoEl,
-            selectedVideoInputId
-          }, blurProcessor);
-
-          blurProcessor = null;
-        }
-      } catch {}
 
     } catch (e) {
       errorMessage.value = e?.message || String(e);
@@ -241,7 +267,6 @@ export function useStreamReceiver() {
       leaving.value = false;
     }
   };
-
 
   // マイクのミュート切替
   const toggleAudioMute = async () => {
@@ -263,7 +288,6 @@ export function useStreamReceiver() {
     }
   };
 
-
   // カメラ映像のミュート切替
   const toggleVideoMute = async () => {
     try {
@@ -284,86 +308,105 @@ export function useStreamReceiver() {
     }
   };
 
-
   // 画面共有の開始 / 停止を切り替える
   const screenShare = async () => {
     if (!joined.value || !localMember.value) return;
 
-    if (isScreenSharing.value) {
-      const camera = await createCameraStream(
-        selectedVideoInputId.value
-          ? { video: { deviceId: selectedVideoInputId.value } }
-          : undefined
-      );
+    try {
+      await unpublishCurrentVideo();
+      releaseLocalVideoStream();
 
-      const videoPub = await localMember.value.publish(camera);
-      localVideoPublication.value = videoPub;
+      if (isScreenSharing.value) {
+        const camera = await createCameraStream(
+          selectedVideoInputId.value
+            ? { video: { deviceId: selectedVideoInputId.value } }
+            : undefined
+        );
 
-      try { if (isVideoMuted.value) await localVideoPublication.value?.disable?.(); } catch {}
+        localVideoStream.value = camera;
+        localVideoPublication.value = await localMember.value.publish(camera);
+        attachLocalPreview(camera);
+        isScreenSharing.value = false;
+
+        if (isBackgroundBlurred.value) {
+          const ret = await enableBackgroundBlur({
+            localMember,
+            localVideoPublication,
+            localVideoStream,
+            localVideoEl
+          });
+          blurProcessor = ret?.processor ?? null;
+        }
+
+      } else {
+        try {
+          await blurProcessor?.dispose?.();
+        } catch {}
+        blurProcessor = null;
+
+        const screen = await createDisplayStream();
+        localVideoStream.value = screen;
+        localVideoPublication.value = await localMember.value.publish(screen);
+        attachLocalPreview(screen);
+        isScreenSharing.value = true;
+      }
 
       try {
-        if (localVideoEl.value) {
-          camera.attach(localVideoEl.value);
-          localVideoEl.value.play?.().catch(() => {});
-        }
+        if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
       } catch {}
 
-      isScreenSharing.value = false;
-
-    } else {
-      const screen = await createDisplayStream();
-      const videoPub = await localMember.value.publish(screen);
-      localVideoPublication.value = videoPub;
-
-      try { if (isVideoMuted.value) await localVideoPublication.value?.disable?.(); } catch {}
-
-      try {
-        if (localVideoEl.value) {
-          screen.attach(localVideoEl.value);
-          localVideoEl.value.play?.().catch(() => {});
-        }
-      } catch {}
-
-      isScreenSharing.value = true;
+    } catch (e) {
+      errorMessage.value = e?.message || String(e);
     }
   };
-
 
   // 背景ぼかしの ON / OFF 切替
   const toggleBackgroundBlur = async () => {
-    if (!joined.value || !localMember.value) return;
+    const nextBlurred = !isBackgroundBlurred.value;
 
-    if (isBackgroundBlurred.value) {
-      await disableBackgroundBlur({
-        localMember,
-        localVideoPublication,
-        localVideoStream: ref(null),
-        localVideoEl,
-        selectedVideoInputId
-      }, blurProcessor);
+    if (!joined.value || !localMember.value || isScreenSharing.value) {
+      isBackgroundBlurred.value = nextBlurred;
+      return;
+    }
 
-      blurProcessor = null;
-      isBackgroundBlurred.value = false;
+    try {
+      if (isBackgroundBlurred.value) {
+        await disableBackgroundBlur({
+          localMember,
+          localVideoPublication,
+          localVideoStream,
+          localVideoEl,
+          selectedVideoInputId
+        }, blurProcessor);
 
-    } else {
-      const ret = await enableBackgroundBlur({
-        localMember,
-        localVideoPublication,
-        localVideoStream: ref(null),
-        localVideoEl
-      });
+        blurProcessor = null;
+        isBackgroundBlurred.value = false;
 
-      blurProcessor = ret.processor;
-      isBackgroundBlurred.value = true;
+      } else {
+        const ret = await enableBackgroundBlur({
+          localMember,
+          localVideoPublication,
+          localVideoStream,
+          localVideoEl
+        });
+
+        blurProcessor = ret?.processor ?? null;
+        isBackgroundBlurred.value = true;
+      }
+
+      try {
+        if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
+      } catch {}
+
+    } catch (e) {
+      errorMessage.value = e?.message || String(e);
     }
   };
 
-
-  // RNNoise の有効 / 無効を切り替える（再接続時に反映）
+  // RNNoise の有効 / 無効を切り替える
   const toggleRnnoise = async () => {
     isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
   };
-
 
   // カメラ選択パネルの開閉と確定
   const openCameraPanel = () => {
@@ -396,8 +439,13 @@ export function useStreamReceiver() {
   const confirmSpeakerPanel = async () => {
     selectedAudioOutputId.value = tempSelectedAudioOutputId.value;
     showSpeakerPanel.value = false;
-  };
 
+    try {
+      await setRemoteAudioOutput(streamArea.value, selectedAudioOutputId.value);
+    } catch (e) {
+      errorMessage.value = e?.message || String(e);
+    }
+  };
 
   // 映像を全画面表示する
   const enlargeVideo = (videoEl) => {
@@ -410,7 +458,6 @@ export function useStreamReceiver() {
     uiShrink(enlargedVideo.value);
     enlargedVideo.value = null;
   };
-
 
   // 初期化処理（デバイス取得・URL クエリ反映）
   onMounted(async () => {
@@ -435,7 +482,6 @@ export function useStreamReceiver() {
   });
 
   onUnmounted(() => {});
-
 
   // UI コンポーネントに公開する状態と操作一覧
   return {

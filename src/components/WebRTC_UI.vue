@@ -81,23 +81,25 @@ const {
           <button v-if="roomId && !joined" :disabled="joining || leaving" @click="joinRoom" class="px-3 py-1.5 rounded bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">{{ joining ? '参加中…' : '参加' }}</button>
           <button v-if="joined" :disabled="leaving" @click="leaveRoom" class="px-3 py-1.5 rounded bg-gray-600 text-white text-sm hover:bg-gray-700 disabled:opacity-50">{{ leaving ? '退出中…' : '退出' }}</button>
         </div>
-        <div v-if="joined" class="flex items-center gap-2">
-          <button @click="toggleAudioMute" :title="isAudioMuted ? 'ミュート解除' : 'ミュート'" :class="['px-3 py-1.5 rounded text-sm', isAudioMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">ミュート🎤</button>
-          <button @click="toggleVideoMute" :title="isVideoMuted ? '映像ON' : '映像OFF'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">映像📹</button>
-          <button @click="screenShare" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
-          <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">ぼかし🟣</button>
-          <button @click="toggleRnnoise" :title="'ノイズ抑制(RNNoise)'" :class="['px-3 py-1.5 rounded text-sm', isRnnoiseEnabled ? 'bg紫-600 text-white' : 'bg-purple-200 text-purple-900']">ノイズ抑制</button>
+        <div class="flex items-center gap-2">
+          <button @click="toggleAudioMute" :title="isAudioMuted ? 'マイクをオン' : 'マイクをオフ'" :class="['px-3 py-1.5 rounded text-sm', isAudioMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">マイク</button>
+          <button @click="toggleVideoMute" :title="isVideoMuted ? 'カメラをオン' : 'カメラをオフ'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">カメラ</button>
+          <button @click="screenShare" :disabled="!joined" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
+          <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">{{ isBackgroundBlurred ? '背景ぼかし ON' : '背景ぼかし OFF' }}</button>
+          <button @click="toggleRnnoise" :title="'ノイズ抑制(RNNoise)'" :class="['px-3 py-1.5 rounded text-sm', isRnnoiseEnabled ? 'bg-purple-600 text-white' : 'bg-purple-200 text-purple-900']">ノイズ抑制</button>
         </div>
         <div class="relative">
-          <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">⋮</button>
-          <div v-if="showSettingsOpen" class="absolute right-0 mt-2 w-48 bg白 border rounded shadow z-40">
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openCameraPanel(); showSettingsOpen=false">カメラ切替</button>
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openMicPanel(); showSettingsOpen=false">マイク切替</button>
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openSpeakerPanel(); showSettingsOpen=false">スピーカー切替</button>
+          <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">設定</button>
+          <div v-if="showSettingsOpen" class="absolute right-0 mt-2 w-48 bg-white border rounded shadow z-40">
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openCameraPanel(); showSettingsOpen=false">カメラ設定</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openMicPanel(); showSettingsOpen=false">マイク設定</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openSpeakerPanel(); showSettingsOpen=false">スピーカー設定</button>
           </div>
         </div>
       </div>
       <div v-if="errorMessage" class="mt-2 text-xs text-red-600">{{ errorMessage }}</div>
+      <div class="mt-2 text-xs text-gray-600">カメラ OFF 中も設定は保持されます</div>
+      <div class="mt-1 text-xs text-gray-600">画面共有中は背景処理は無効です</div>
     </header>
 
     <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
