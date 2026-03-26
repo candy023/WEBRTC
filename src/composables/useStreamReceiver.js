@@ -43,11 +43,11 @@ export function useStreamReceiver() {
   const localMember = ref(null);             // 自分自身の SkyWay Member
   const errorMessage = ref('');              // UI 表示用エラーメッセージ
   const remoteVideos = ref([]);              // 生成済みリモート映像 DOM の管理配列
-  const screenShareTiles = ref([]);
-  const selectedMainSharePubId = ref(null);
-  const cameraFilmstripTiles = ref([]);
+  const screenShareTiles = ref([]);          // 画面共有タイル一覧。メイン共有の選択同期と描画に使う
+  const selectedMainSharePubId = ref(null);  // メイン表示中の共有 pubId。共有削除時のフォールバック判定で使う
+  const cameraFilmstripTiles = ref([]);      // カメラ映像タイル一覧。フィルムストリップ描画と削除同期に使う
   const localVideoEl = ref(null);            // ローカルプレビュー用 video 要素
-  const localSelfCameraPreviewEl = ref(null);
+  const localSelfCameraPreviewEl = ref(null); // 画面共有中の自分カメラプレビュー表示先 video 要素
   const leaving = ref(false);                // leave の多重実行防止フラグ
   const isAudioMuted = ref(false);           // マイクがミュート中か
   const isVideoMuted = ref(false);           // カメラがミュート中か
@@ -75,15 +75,15 @@ export function useStreamReceiver() {
   const localVideoPublication = ref(null);   // 自分の映像 Publication
   const localAudioPublication = ref(null);   // 自分の音声 Publication
   const localVideoStream = ref(null);        // ローカル映像ストリーム参照
-  const localSelfCameraPreviewStream = ref(null);
+  const localSelfCameraPreviewStream = ref(null); // プレビュー専用のローカルカメラ stream。切替時の解放に使う
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
   let streamPublishedHandler = null;         // onStreamPublished の解除に使うハンドラ参照
-  let streamUnpublishedHandler = null;
+  let streamUnpublishedHandler = null;       // onStreamUnpublished の購読解除に使うハンドラ参照
   const receivedPublicationIds = new Set();  // 受信済み publication の ID を記録（重複 subscribe 防止）
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
-  let localTileContainerEl = null;
-  let localTileVideoEl = null;
+  let localTileContainerEl = null;           // ローカルタイルを再利用するためのコンテナ要素参照
+  let localTileVideoEl = null;               // ローカルタイル内で stream attach 先になる video 要素参照
 
   const releaseLocalVideoStream = () => {
     try {
