@@ -2,6 +2,7 @@
 // このコンポーネントは UI 表示に専念します。
 // - 実際の WebRTC / SkyWay の接続やメディア処理は `useStreamReceiver` と各 services に委譲しています。
 // - ここでは「なぜその ref/関数が必要か」を示すコメントを残し、UI 側の意図を明確にします。
+import { computed } from 'vue';
 import { useStreamReceiver } from '../composables/useStreamReceiver.js';
 const {
   // `streamArea`: remote 映像が差し込まれるコンテナ。VideoUIService が DOM を生成してここに挿入します。
@@ -17,6 +18,9 @@ const {
   errorMessage,
   // VideoUIService が挿入した remote タイルの参照リスト。UI 側でのクリーンアップに利用
   remoteVideos,
+  screenShareTiles,
+  selectedMainSharePubId,
+  cameraFilmstripTiles,
   // ローカルプレビューの video 要素。UI が直接 DOM 参照を持つ理由は、サービス側で attach するため
   localVideoEl,
   leaving,
@@ -69,6 +73,37 @@ const {
   enlargeVideo,
   shrinkVideo,
 } = useStreamReceiver();
+
+const selectedMainShareTile = computed(() => {
+  if (!selectedMainSharePubId.value) return null;
+  return screenShareTiles.value.find((tile) => tile.pubId === selectedMainSharePubId.value) || null;
+});
+
+const shareTilesForList = computed(() => {
+  return screenShareTiles.value;
+});
+
+const applyTileVideoMode = (tile, mode) => {
+  const videoEl = tile?.el?.querySelector?.('video');
+  if (!videoEl) return;
+
+  if (mode === 'main' || mode === 'share') {
+    videoEl.classList.remove('object-cover');
+    videoEl.classList.add('object-contain');
+    return;
+  }
+
+  videoEl.classList.remove('object-contain');
+  videoEl.classList.add('object-cover');
+};
+
+const mountTileElement = (host, tile, mode = 'camera') => {
+  if (!host || !tile?.el) return;
+  applyTileVideoMode(tile, mode);
+  if (tile.el.parentNode !== host) {
+    host.replaceChildren(tile.el);
+  }
+};
 </script>
 
 <template>
@@ -140,16 +175,48 @@ const {
       </div>
     </div>
 
-    <div
-      ref="streamArea"
-      v-if="roomCreated"
-      class="border rounded p-3 max-h-[65vh] overflow-y-auto"
-      style="display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;"
-    >
-      <div v-if="joined" class="relative w-full aspect-video bg-black rounded overflow-hidden">
-        <video ref="localVideoEl" autoplay playsinline muted class="w-full h-full object-cover" />
-        <button @click="enlargeVideo(localVideoEl)" class="absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm">⛶</button>
+    <div v-if="roomCreated" class="space-y-4 md:space-y-5">
+      <div class="border rounded p-2 md:p-3 bg-gray-50">
+        <div v-if="selectedMainShareTile" class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
+        <div v-else class="w-full aspect-video rounded bg-gray-100 text-gray-500 text-sm flex items-center justify-center">共有中の画面はありません。</div>
       </div>
+
+      <div v-if="screenShareTiles.length > 1" class="space-y-2">
+        <div class="text-xs text-gray-600">共有サムネイル</div>
+        <div class="flex gap-2 md:gap-3 overflow-x-auto pb-1">
+          <div
+            v-for="tile in shareTilesForList"
+            :key="`share-${tile.pubId}`"
+            :class="[
+              'shrink-0 min-w-36 md:min-w-44 lg:min-w-48 cursor-pointer rounded p-1',
+              tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
+            ]"
+            @click="selectedMainSharePubId = tile.pubId"
+          >
+            <div
+              v-if="tile.pubId === selectedMainSharePubId"
+              class="relative w-full aspect-video bg-black rounded overflow-hidden flex items-center justify-center text-xs text-white"
+            >
+              選択中
+            </div>
+            <div v-else class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'share')" />
+            <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <div class="text-xs text-gray-600">参加者カメラ</div>
+        <div class="flex gap-2 md:gap-3 overflow-x-auto pb-1">
+          <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" class="shrink-0 min-w-32 md:min-w-56 lg:min-w-64">
+            <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+            <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div ref="streamArea" class="hidden" />
+      <video ref="localVideoEl" autoplay playsinline muted class="hidden" />
     </div>
     <div v-else class="text-gray-500 italic">まだルームは作成されていません。</div>
   </div>
