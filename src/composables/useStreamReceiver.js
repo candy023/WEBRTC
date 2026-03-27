@@ -31,7 +31,22 @@ import {
 import { setupRnnoise } from '../services/RnnoiseService.js';
 import { enumerateDevices, getDefaultSelections } from '../services/DeviceService.js';
 import { attachRemoteStream, setRemoteAudioOutput, enlargeVideo as uiEnlarge, shrinkVideo as uiShrink } from '../services/VideoUIService.js';
+import {
+  ensureLocalTileElement,
+  isScreenPublication,
+  isVideoStream,
+  removeTileFromList,
+  syncSelectedMainShare,
+  upsertVideoTile,
+} from './helpers/useVideoTiles.js';
 
+/**
+ * WebRTC 画面の state と service 呼び出し順序を管理する orchestrator composable。
+ *
+ * @returns {object} UI から利用する state ref と操作関数の集合。
+ * @throws {never}
+ * @sideeffects SkyWay 接続、メディアデバイス利用、DOM 操作を行う。
+ */
 export function useStreamReceiver() {
 
   // --- UI 側と直接バインドされる状態（状態管理の中核） ---
@@ -109,7 +124,14 @@ export function useStreamReceiver() {
       stream.attach(localVideoEl.value);
       localVideoEl.value.play?.().catch(() => {});
 
-      ensureLocalTileElement();
+      const { containerEl, videoEl } = ensureLocalTileElement({
+        currentContainerEl: localTileContainerEl,
+        currentVideoEl: localTileVideoEl,
+        onEnlarge: handleLocalTileEnlarge,
+      });
+      localTileContainerEl = containerEl;
+      localTileVideoEl = videoEl;
+
       if (localTileVideoEl) {
         stream.attach(localTileVideoEl);
         localTileVideoEl.play?.().catch(() => {});
@@ -162,51 +184,36 @@ export function useStreamReceiver() {
     } catch {}
   };
 
-  const parsePublicationKind = (publication) => {
-    if (!publication?.metadata) return '';
+  const syncSelectedMainShareState = () => {
+    selectedMainSharePubId.value = syncSelectedMainShare(
+      selectedMainSharePubId.value,
+      screenShareTiles.value
+    );
+  };
+
+  const handleLocalTileEnlarge = (videoEl) => {
     try {
-      const parsed = JSON.parse(publication.metadata);
-      if (typeof parsed?.kind === 'string') return parsed.kind;
+      uiEnlarge(videoEl);
+      enlargedVideo.value = videoEl;
     } catch {}
-    return '';
   };
 
-  const isScreenPublication = (publication) => parsePublicationKind(publication) === 'screen';
-
-  const isVideoStream = (stream) => !!(
-    stream?.track?.kind === 'video' ||
-    (stream?.mediaStream && stream.mediaStream.getVideoTracks?.().length)
-  );
-
-  const syncSelectedMainShare = () => {
-    if (!screenShareTiles.value.length) {
-      selectedMainSharePubId.value = null;
-      return;
-    }
-
-    if (!selectedMainSharePubId.value) {
-      selectedMainSharePubId.value = screenShareTiles.value[0].pubId;
-      return;
-    }
-
-    const exists = screenShareTiles.value.some((tile) => tile.pubId === selectedMainSharePubId.value);
-    if (!exists) {
-      selectedMainSharePubId.value = screenShareTiles.value[0].pubId;
-    }
-  };
-
-  const removeTileFromList = (listRef, pubId) => {
-    const index = listRef.value.findIndex((tile) => tile.pubId === pubId);
-    if (index < 0) return null;
-    const [tile] = listRef.value.splice(index, 1);
-    return tile;
+  const ensureLocalTileRefs = () => {
+    const { containerEl, videoEl } = ensureLocalTileElement({
+      currentContainerEl: localTileContainerEl,
+      currentVideoEl: localTileVideoEl,
+      onEnlarge: handleLocalTileEnlarge,
+    });
+    localTileContainerEl = containerEl;
+    localTileVideoEl = videoEl;
+    return { containerEl, videoEl };
   };
 
   const removeTileByPubId = (pubId) => {
     if (!pubId) return;
 
-    const removedScreenTile = removeTileFromList(screenShareTiles, pubId);
-    const removedCameraTile = removeTileFromList(cameraFilmstripTiles, pubId);
+    const removedScreenTile = removeTileFromList(screenShareTiles.value, pubId);
+    const removedCameraTile = removeTileFromList(cameraFilmstripTiles.value, pubId);
     const removedTile = removedScreenTile || removedCameraTile;
 
     if (removedTile?.el && !removedTile.isLocal) {
@@ -227,62 +234,7 @@ export function useStreamReceiver() {
       }
     }
 
-    syncSelectedMainShare();
-  };
-
-  const upsertTileToList = (listRef, tile) => {
-    const index = listRef.value.findIndex((item) => item.pubId === tile.pubId);
-    if (index >= 0) {
-      listRef.value[index] = tile;
-    } else {
-      listRef.value.push(tile);
-    }
-  };
-
-  const upsertVideoTile = (publication, tile) => {
-    if (!publication?.id || !tile?.el) return;
-
-    removeTileFromList(screenShareTiles, publication.id);
-    removeTileFromList(cameraFilmstripTiles, publication.id);
-
-    if (isScreenPublication(publication)) {
-      upsertTileToList(screenShareTiles, tile);
-    } else {
-      upsertTileToList(cameraFilmstripTiles, tile);
-    }
-
-    syncSelectedMainShare();
-  };
-
-  const ensureLocalTileElement = () => {
-    if (localTileContainerEl && localTileVideoEl) return;
-
-    const container = document.createElement('div');
-    container.className = 'relative w-full aspect-video bg-black rounded overflow-hidden';
-
-    const videoEl = document.createElement('video');
-    videoEl.autoplay = true;
-    videoEl.playsInline = true;
-    videoEl.muted = true;
-    videoEl.className = 'w-full h-full object-cover';
-
-    const enlargeBtn = document.createElement('button');
-    enlargeBtn.innerHTML = '⛶';
-    enlargeBtn.className =
-      'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
-    enlargeBtn.onclick = (e) => {
-      e.stopPropagation();
-      try {
-        uiEnlarge(videoEl);
-        enlargedVideo.value = videoEl;
-      } catch {}
-    };
-
-    container.appendChild(videoEl);
-    container.appendChild(enlargeBtn);
-
-    localTileContainerEl = container;
-    localTileVideoEl = videoEl;
+    syncSelectedMainShareState();
   };
 
   const syncLocalVideoTile = () => {
@@ -291,13 +243,13 @@ export function useStreamReceiver() {
 
     const publication = localVideoPublication.value;
     if (!publication?.id || !localMember.value?.id) {
-      syncSelectedMainShare();
+      syncSelectedMainShareState();
       return;
     }
 
-    ensureLocalTileElement();
+    ensureLocalTileRefs();
     if (!localTileContainerEl) {
-      syncSelectedMainShare();
+      syncSelectedMainShareState();
       return;
     }
 
@@ -318,7 +270,7 @@ export function useStreamReceiver() {
       cameraFilmstripTiles.value.push(tile);
     }
 
-    syncSelectedMainShare();
+    syncSelectedMainShareState();
   };
 
   const updateLocalVideoPublicationMetadata = async (kind) => {
@@ -351,10 +303,23 @@ export function useStreamReceiver() {
       el,
       isLocal: false
     };
-    upsertVideoTile(pub, tile);
+    upsertVideoTile({
+      publication: pub,
+      tile,
+      screenShareTiles: screenShareTiles.value,
+      cameraFilmstripTiles: cameraFilmstripTiles.value,
+    });
+    syncSelectedMainShareState();
   };
 
   // ルームを作成し、URL 共有の起点を確定する
+  /**
+   * URL または入力値の roomId を使って room を準備する。
+   *
+   * @returns {Promise<void>}
+   * @throws {Error} SkyWay Context / Room 作成時の例外をそのまま伝播。
+   * @sideeffects context.ctx / context.room / roomCreated / roomId を更新する。
+   */
   const createRoom = async () => {
     if (!roomId.value) {
       roomId.value = window.crypto?.randomUUID?.() || 'demo-room';
@@ -369,6 +334,13 @@ export function useStreamReceiver() {
   };
 
   // ルームに参加し、ローカル publish とリモート subscribe をまとめて行う
+  /**
+   * room 参加とローカル publish、および既存/新規 publication の購読を開始する。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects 接続 state、ローカル publication、タイル state、イベントハンドラを更新する。
+   */
   const joinRoom = async () => {
     if (joining.value || joined.value) return;
     joining.value = true;
@@ -473,6 +445,13 @@ export function useStreamReceiver() {
   };
 
   // ルーム退出およびすべてのリソース解放
+  /**
+   * room 退出とローカル/リモート資源の解放を行う。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects SkyWay 退出、DOM 要素削除、stream 解放、各種 state 初期化を行う。
+   */
   const leaveRoom = async () => {
     if (!joined.value || leaving.value) return;
     leaving.value = true;
@@ -488,11 +467,7 @@ export function useStreamReceiver() {
       streamUnpublishedHandler = null;
 
       stopLocalSelfCameraPreview();
-
-      await skywayLeave(localMember.value, context.room, {
-        videoPub: localVideoPublication.value,
-        audioPub: localAudioPublication.value
-      });
+      await skywayLeave(localMember.value);
 
       remoteVideos.value.forEach(el => { try { el?.remove?.(); } catch {} });
       remoteVideos.value = [];
@@ -535,6 +510,13 @@ export function useStreamReceiver() {
   };
 
   // マイクのミュート切替
+  /**
+   * ローカル音声 publication の mute/unmute を切り替える。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects localAudioPublication と isAudioMuted を更新する。
+   */
   const toggleAudioMute = async () => {
     try {
       if (!localAudioPublication.value) {
@@ -555,6 +537,13 @@ export function useStreamReceiver() {
   };
 
   // カメラ映像のミュート切替
+  /**
+   * ローカル映像 publication の mute/unmute を切り替える。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects localVideoPublication と isVideoMuted を更新する。
+   */
   const toggleVideoMute = async () => {
     try {
       if (!localVideoPublication.value) {
@@ -575,6 +564,13 @@ export function useStreamReceiver() {
   };
 
   // 画面共有の開始 / 停止を切り替える
+  /**
+   * 画面共有とカメラ配信を相互に切り替える。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects localVideoStream/publication、プレビュー、タイル state を更新する。
+   */
   const screenShare = async () => {
     if (!joined.value || !localMember.value) return;
 
@@ -641,6 +637,13 @@ export function useStreamReceiver() {
   };
 
   // 背景ぼかしの ON / OFF 切替
+  /**
+   * 背景ぼかしの ON/OFF を切り替える。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects video processor、local publication、タイル state を更新する。
+   */
   const toggleBackgroundBlur = async () => {
     const nextBlurred = !isBackgroundBlurred.value;
 
@@ -687,16 +690,44 @@ export function useStreamReceiver() {
   };
 
   // RNNoise の有効 / 無効を切り替える
+  /**
+   * RNNoise 利用フラグを切り替える。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects isRnnoiseEnabled を更新する。
+   */
   const toggleRnnoise = async () => {
     isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
   };
 
   // カメラ選択パネルの開閉と確定
+  /**
+   * カメラ選択パネルを開く。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showCameraPanel / tempSelectedVideoInputId を更新する。
+   */
   const openCameraPanel = () => {
     showCameraPanel.value = true;
     tempSelectedVideoInputId.value = selectedVideoInputId.value;
   };
+  /**
+   * カメラ選択パネルを閉じる。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showCameraPanel を更新する。
+   */
   const cancelCameraPanel = () => { showCameraPanel.value = false; };
+  /**
+   * カメラ選択パネルの選択を確定する。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects selectedVideoInputId とプレビュー表示を更新する。
+   */
   const confirmCameraPanel = async () => {
     selectedVideoInputId.value = tempSelectedVideoInputId.value;
     showCameraPanel.value = false;
@@ -706,22 +737,64 @@ export function useStreamReceiver() {
   };
 
   // マイク選択パネルの開閉と確定
+  /**
+   * マイク選択パネルを開く。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showMicPanel / tempSelectedAudioInputId を更新する。
+   */
   const openMicPanel = () => {
     showMicPanel.value = true;
     tempSelectedAudioInputId.value = selectedAudioInputId.value;
   };
+  /**
+   * マイク選択パネルを閉じる。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showMicPanel を更新する。
+   */
   const cancelMicPanel = () => { showMicPanel.value = false; };
+  /**
+   * マイク選択パネルの選択を確定する。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects selectedAudioInputId を更新する。
+   */
   const confirmMicPanel = async () => {
     selectedAudioInputId.value = tempSelectedAudioInputId.value;
     showMicPanel.value = false;
   };
 
   // スピーカー選択パネルの開閉と確定
+  /**
+   * スピーカー選択パネルを開く。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showSpeakerPanel / tempSelectedAudioOutputId を更新する。
+   */
   const openSpeakerPanel = () => {
     showSpeakerPanel.value = true;
     tempSelectedAudioOutputId.value = selectedAudioOutputId.value;
   };
+  /**
+   * スピーカー選択パネルを閉じる。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects showSpeakerPanel を更新する。
+   */
   const cancelSpeakerPanel = () => { showSpeakerPanel.value = false; };
+  /**
+   * スピーカー選択パネルの選択を確定し、出力先を再適用する。
+   *
+   * @returns {Promise<void>}
+   * @throws {never}
+   * @sideeffects selectedAudioOutputId と既存 remote audio 要素の sinkId を更新する。
+   */
   const confirmSpeakerPanel = async () => {
     selectedAudioOutputId.value = tempSelectedAudioOutputId.value;
     showSpeakerPanel.value = false;
@@ -734,12 +807,27 @@ export function useStreamReceiver() {
   };
 
   // 映像を全画面表示する
+  /**
+   * 指定 video 要素を全画面オーバーレイ表示へ移す。
+   *
+   * @param {HTMLVideoElement} videoEl
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects DOM 再配置と enlargedVideo の更新を行う。
+   */
   const enlargeVideo = (videoEl) => {
     uiEnlarge(videoEl);
     enlargedVideo.value = videoEl;
   };
 
   // 全画面表示を解除する
+  /**
+   * 全画面オーバーレイ表示を解除する。
+   *
+   * @returns {void}
+   * @throws {never}
+   * @sideeffects DOM 復元と enlargedVideo の初期化を行う。
+   */
   const shrinkVideo = () => {
     uiShrink(enlargedVideo.value);
     enlargedVideo.value = null;
