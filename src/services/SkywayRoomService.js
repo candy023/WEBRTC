@@ -97,6 +97,45 @@ export function unbindOnStreamPublished(room, handler) {
 }
 
 /**
+ * onStreamUnpublished を購読して handler を返す。
+ *
+ * @param {import('@skyway-sdk/room').Room | null | undefined} room 購読対象の room。
+ * @param {(event: any) => (void | Promise<void>)} onUnpublished unpublish 発生時に実行する処理。
+ * @returns {(event: any) => Promise<void> | null} 登録した handler。登録できない場合は null。
+ * @throws {never}
+ * @sideeffects room.onStreamUnpublished に handler を追加する
+ */
+export function bindOnStreamUnpublished(room, onUnpublished) {
+  if (!room || !onUnpublished) return null;
+
+  const handler = async (event) => {
+    try {
+      await onUnpublished(event);
+    } catch {}
+  };
+
+  room.onStreamUnpublished.add(handler);
+  return handler;
+}
+
+/**
+ * 登録済みの onStreamUnpublished handler を解除する。
+ *
+ * @param {import('@skyway-sdk/room').Room | null | undefined} room 解除対象の room。
+ * @param {(event: any) => Promise<void> | null} handler 解除する handler。
+ * @returns {void}
+ * @throws {never}
+ * @sideeffects room.onStreamUnpublished から handler を削除する
+ */
+export function unbindOnStreamUnpublished(room, handler) {
+  if (!room || !handler) return;
+
+  try {
+    room.onStreamUnpublished.remove(handler);
+  } catch {}
+}
+
+/**
  * local member が存在する場合だけ退室を試みる。
  */
 export async function leave(member) {

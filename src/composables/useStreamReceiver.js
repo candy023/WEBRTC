@@ -19,26 +19,32 @@ import {
   subscribeExisting,
   bindOnStreamPublished,
   unbindOnStreamPublished,
+  bindOnStreamUnpublished,
+  unbindOnStreamUnpublished,
   leave as skywayLeave,
 } from '../services/SkywayRoomService.js';
 import {
   createCameraStream,
   createMicrophoneStream,
-  createDisplayStream,
   enableBackgroundBlur,
-  disableBackgroundBlur,
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
 import { enumerateDevices, getDefaultSelections } from '../services/DeviceService.js';
-import { attachRemoteStream, setRemoteAudioOutput, enlargeVideo as uiEnlarge, shrinkVideo as uiShrink } from '../services/VideoUIService.js';
 import {
+  attachRemoteStream,
+  setRemoteAudioOutput,
   ensureLocalTileElement,
+  enlargeVideo as uiEnlarge,
+  shrinkVideo as uiShrink
+} from '../services/VideoUIService.js';
+import {
   isScreenPublication,
   isVideoStream,
   removeTileFromList,
   syncSelectedMainShare,
   upsertVideoTile,
 } from './helpers/useVideoTiles.js';
+import { useLocalMediaSession } from './useLocalMediaSession.js';
 
 /**
  * WebRTC 画面の state と service 呼び出し順序を管理する orchestrator composable。
@@ -105,74 +111,6 @@ export function useStreamReceiver() {
       localVideoStream.value?.release?.();
     } catch {}
     localVideoStream.value = null;
-  };
-
-  const unpublishCurrentVideo = async () => {
-    const currentPubId = localVideoPublication.value?.id ?? null;
-    try {
-      if (localMember.value && localVideoPublication.value) {
-        await localMember.value.unpublish(localVideoPublication.value);
-      }
-    } catch {}
-    localVideoPublication.value = null;
-    if (currentPubId) removeTileByPubId(currentPubId);
-  };
-
-  const attachLocalPreview = (stream) => {
-    try {
-      if (!stream || !localVideoEl.value) return;
-      stream.attach(localVideoEl.value);
-      localVideoEl.value.play?.().catch(() => {});
-
-      const { containerEl, videoEl } = ensureLocalTileElement({
-        currentContainerEl: localTileContainerEl,
-        currentVideoEl: localTileVideoEl,
-        onEnlarge: handleLocalTileEnlarge,
-      });
-      localTileContainerEl = containerEl;
-      localTileVideoEl = videoEl;
-
-      if (localTileVideoEl) {
-        stream.attach(localTileVideoEl);
-        localTileVideoEl.play?.().catch(() => {});
-      }
-    } catch {}
-  };
-
-  const stopLocalSelfCameraPreview = () => {
-    try {
-      localSelfCameraPreviewStream.value?.release?.();
-    } catch {}
-    localSelfCameraPreviewStream.value = null;
-
-    try {
-      localSelfCameraPreviewEl.value?.pause?.();
-    } catch {}
-    try {
-      if (localSelfCameraPreviewEl.value) localSelfCameraPreviewEl.value.srcObject = null;
-    } catch {}
-  };
-
-  const startLocalSelfCameraPreview = async () => {
-    if (!isScreenSharing.value) return;
-
-    stopLocalSelfCameraPreview();
-
-    try {
-      const previewStream = await createCameraStream(
-        selectedVideoInputId.value
-          ? { video: { deviceId: selectedVideoInputId.value } }
-          : undefined
-      );
-      localSelfCameraPreviewStream.value = previewStream;
-
-      await nextTick();
-
-      if (localSelfCameraPreviewEl.value) {
-        previewStream.attach(localSelfCameraPreviewEl.value);
-        localSelfCameraPreviewEl.value.play?.().catch(() => {});
-      }
-    } catch {}
   };
 
   const reflectInitialMuteState = async () => {
@@ -279,6 +217,55 @@ export function useStreamReceiver() {
     } catch {}
   };
 
+  const getLocalTileElements = () => ({
+    containerEl: localTileContainerEl,
+    videoEl: localTileVideoEl,
+  });
+
+  const setLocalTileElements = ({ containerEl, videoEl }) => {
+    localTileContainerEl = containerEl;
+    localTileVideoEl = videoEl;
+  };
+
+  const getBlurProcessor = () => blurProcessor;
+
+  const setBlurProcessor = (nextBlurProcessor) => {
+    blurProcessor = nextBlurProcessor;
+  };
+
+  // ローカルメディア操作（画面共有/背景ぼかし/ローカルプレビュー）の委譲先。
+  const localMediaSessionHandlers = useLocalMediaSession({
+    joined,
+    localMember,
+    localVideoPublication,
+    localVideoStream,
+    localVideoEl,
+    localSelfCameraPreviewStream,
+    localSelfCameraPreviewEl,
+    selectedVideoInputId,
+    isScreenSharing,
+    isBackgroundBlurred,
+    isVideoMuted,
+    setErrorMessage: (message) => {
+      errorMessage.value = message;
+    },
+    removeTileByPubId,
+    syncLocalVideoTile,
+    updateLocalVideoPublicationMetadata,
+    releaseLocalVideoStream,
+    getBlurProcessor,
+    setBlurProcessor,
+    getLocalTileElements,
+    setLocalTileElements,
+    onLocalTileEnlarge: handleLocalTileEnlarge,
+  });
+
+  const {
+    attachLocalPreview,
+    stopLocalSelfCameraPreview,
+    startLocalSelfCameraPreview,
+  } = localMediaSessionHandlers;
+
   const attachRemote = async (stream, pub) => {
     if (!pub?.id) return;
     if (receivedPublicationIds.has(pub.id)) return;
@@ -360,9 +347,7 @@ export function useStreamReceiver() {
         streamPublishedHandler = null;
       }
       if (streamUnpublishedHandler) {
-        try {
-          context.room?.onStreamUnpublished?.remove(streamUnpublishedHandler);
-        } catch {}
+        unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
         streamUnpublishedHandler = null;
       }
 
@@ -378,13 +363,12 @@ export function useStreamReceiver() {
           }
         }
       );
-      streamUnpublishedHandler = async (event) => {
+      streamUnpublishedHandler = bindOnStreamUnpublished(context.room, async (event) => {
         const publication = event?.publication;
         if (!publication?.id) return;
         receivedPublicationIds.delete(publication.id);
         removeTileByPubId(publication.id);
-      };
-      context.room.onStreamUnpublished.add(streamUnpublishedHandler);
+      });
 
       const videoStream = await createCameraStream(
         selectedVideoInputId.value
@@ -460,9 +444,7 @@ export function useStreamReceiver() {
       if (streamPublishedHandler) unbindOnStreamPublished(context.room, streamPublishedHandler);
       streamPublishedHandler = null;
       if (streamUnpublishedHandler) {
-        try {
-          context.room?.onStreamUnpublished?.remove(streamUnpublishedHandler);
-        } catch {}
+        unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
       }
       streamUnpublishedHandler = null;
 
@@ -572,68 +554,7 @@ export function useStreamReceiver() {
    * @sideeffects localVideoStream/publication、プレビュー、タイル state を更新する。
    */
   const screenShare = async () => {
-    if (!joined.value || !localMember.value) return;
-
-    try {
-      if (isScreenSharing.value) {
-        stopLocalSelfCameraPreview();
-        await unpublishCurrentVideo();
-        releaseLocalVideoStream();
-
-        const camera = await createCameraStream(
-          selectedVideoInputId.value
-            ? { video: { deviceId: selectedVideoInputId.value } }
-            : undefined
-        );
-
-        localVideoStream.value = camera;
-        localVideoPublication.value = await localMember.value.publish(camera, {
-          metadata: JSON.stringify({ kind: 'camera' })
-        });
-        attachLocalPreview(camera);
-        isScreenSharing.value = false;
-        syncLocalVideoTile();
-
-        if (isBackgroundBlurred.value) {
-          const ret = await enableBackgroundBlur({
-            localMember,
-            localVideoPublication,
-            localVideoStream,
-            localVideoEl
-          });
-          blurProcessor = ret?.processor ?? null;
-          await updateLocalVideoPublicationMetadata('camera');
-          attachLocalPreview(localVideoStream.value);
-          syncLocalVideoTile();
-        }
-
-      } else {
-        await unpublishCurrentVideo();
-        releaseLocalVideoStream();
-
-        try {
-          await blurProcessor?.dispose?.();
-        } catch {}
-        blurProcessor = null;
-
-        const screen = await createDisplayStream();
-        localVideoStream.value = screen;
-        localVideoPublication.value = await localMember.value.publish(screen, {
-          metadata: JSON.stringify({ kind: 'screen' })
-        });
-        attachLocalPreview(screen);
-        isScreenSharing.value = true;
-        syncLocalVideoTile();
-        await startLocalSelfCameraPreview();
-      }
-
-      try {
-        if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
-      } catch {}
-
-    } catch (e) {
-      errorMessage.value = e?.message || String(e);
-    }
+    await localMediaSessionHandlers.screenShare();
   };
 
   // 背景ぼかしの ON / OFF 切替
@@ -645,48 +566,7 @@ export function useStreamReceiver() {
    * @sideeffects video processor、local publication、タイル state を更新する。
    */
   const toggleBackgroundBlur = async () => {
-    const nextBlurred = !isBackgroundBlurred.value;
-
-    if (!joined.value || !localMember.value || isScreenSharing.value) {
-      isBackgroundBlurred.value = nextBlurred;
-      return;
-    }
-
-    try {
-      if (isBackgroundBlurred.value) {
-        await disableBackgroundBlur({
-          localMember,
-          localVideoPublication,
-          localVideoStream,
-          localVideoEl,
-          selectedVideoInputId
-        }, blurProcessor);
-
-        blurProcessor = null;
-        isBackgroundBlurred.value = false;
-
-      } else {
-        const ret = await enableBackgroundBlur({
-          localMember,
-          localVideoPublication,
-          localVideoStream,
-          localVideoEl
-        });
-
-        blurProcessor = ret?.processor ?? null;
-        isBackgroundBlurred.value = true;
-      }
-      await updateLocalVideoPublicationMetadata('camera');
-      attachLocalPreview(localVideoStream.value);
-      syncLocalVideoTile();
-
-      try {
-        if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
-      } catch {}
-
-    } catch (e) {
-      errorMessage.value = e?.message || String(e);
-    }
+    await localMediaSessionHandlers.toggleBackgroundBlur();
   };
 
   // RNNoise の有効 / 無効を切り替える
