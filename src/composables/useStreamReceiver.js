@@ -33,6 +33,7 @@ import { enumerateDevices, getDefaultSelections } from '../services/DeviceServic
 import {
   attachRemoteStream,
   setRemoteAudioOutput,
+  setRemoteAudioMuteBadgeVisible,
   ensureLocalTileElement,
   enlargeVideo as uiEnlarge,
   shrinkVideo as uiShrink
@@ -100,6 +101,8 @@ export function useStreamReceiver() {
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
   let streamPublishedHandler = null;         // onStreamPublished の解除に使うハンドラ参照
   let streamUnpublishedHandler = null;       // onStreamUnpublished の購読解除に使うハンドラ参照
+  let publicationEnabledHandler = null;      // onPublicationEnabled の購読解除に使うハンドラ参照
+  let publicationDisabledHandler = null;     // onPublicationDisabled の購読解除に使うハンドラ参照
   const receivedPublicationIds = new Set();  // 受信済み publication の ID を記録（重複 subscribe 防止）
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
@@ -233,6 +236,44 @@ export function useStreamReceiver() {
     blurProcessor = nextBlurProcessor;
   };
 
+  const isRemoteAudioPublication = (publication) => {
+    if (!publication) return false;
+    if (publication.contentType !== 'audio') return false;
+
+    const publisherId = publication.publisher?.id;
+    if (!publisherId) return false;
+    if (localMember.value?.id && publisherId === localMember.value.id) return false;
+
+    return true;
+  };
+
+  const syncRemoteAudioMuteBadge = (publication) => {
+    if (!isRemoteAudioPublication(publication)) return;
+
+    setRemoteAudioMuteBadgeVisible(
+      streamArea.value,
+      publication.publisher.id,
+      publication.state === 'disabled'
+    );
+  };
+
+  const syncRemoteAudioMuteBadgeByMemberId = (memberId) => {
+    if (!memberId || !context.room) return;
+
+    const memberAudioPublication = (context.room.publications ?? []).find(
+      (publication) => (
+        publication?.contentType === 'audio' &&
+        publication?.publisher?.id === memberId
+      )
+    );
+
+    setRemoteAudioMuteBadgeVisible(
+      streamArea.value,
+      memberId,
+      memberAudioPublication?.state === 'disabled'
+    );
+  };
+
   // ローカルメディア操作（画面共有/背景ぼかし/ローカルプレビュー）の委譲先。
   const localMediaSessionHandlers = useLocalMediaSession({
     joined,
@@ -281,6 +322,8 @@ export function useStreamReceiver() {
       remoteVideos.value.push(el);
     }
 
+    syncRemoteAudioMuteBadge(pub);
+
     if (!isVideoStream(stream) || !el) return;
 
     const tile = {
@@ -297,6 +340,7 @@ export function useStreamReceiver() {
       cameraFilmstripTiles: cameraFilmstripTiles.value,
     });
     syncSelectedMainShareState();
+    syncRemoteAudioMuteBadgeByMemberId(pub?.publisher?.id);
   };
 
   // ルームを作成し、URL 共有の起点を確定する
@@ -350,6 +394,18 @@ export function useStreamReceiver() {
         unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
         streamUnpublishedHandler = null;
       }
+      if (publicationEnabledHandler) {
+        try {
+          context.room?.onPublicationEnabled?.remove(publicationEnabledHandler);
+        } catch {}
+        publicationEnabledHandler = null;
+      }
+      if (publicationDisabledHandler) {
+        try {
+          context.room?.onPublicationDisabled?.remove(publicationDisabledHandler);
+        } catch {}
+        publicationDisabledHandler = null;
+      }
 
       streamPublishedHandler = bindOnStreamPublished(
         context.room,
@@ -366,9 +422,20 @@ export function useStreamReceiver() {
       streamUnpublishedHandler = bindOnStreamUnpublished(context.room, async (event) => {
         const publication = event?.publication;
         if (!publication?.id) return;
+        if (isRemoteAudioPublication(publication)) {
+          setRemoteAudioMuteBadgeVisible(streamArea.value, publication.publisher.id, false);
+        }
         receivedPublicationIds.delete(publication.id);
         removeTileByPubId(publication.id);
       });
+      publicationEnabledHandler = (event) => {
+        syncRemoteAudioMuteBadge(event?.publication);
+      };
+      publicationDisabledHandler = (event) => {
+        syncRemoteAudioMuteBadge(event?.publication);
+      };
+      context.room?.onPublicationEnabled?.add(publicationEnabledHandler);
+      context.room?.onPublicationDisabled?.add(publicationDisabledHandler);
 
       const videoStream = await createCameraStream(
         selectedVideoInputId.value
@@ -447,6 +514,18 @@ export function useStreamReceiver() {
         unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
       }
       streamUnpublishedHandler = null;
+      if (publicationEnabledHandler) {
+        try {
+          context.room?.onPublicationEnabled?.remove(publicationEnabledHandler);
+        } catch {}
+      }
+      publicationEnabledHandler = null;
+      if (publicationDisabledHandler) {
+        try {
+          context.room?.onPublicationDisabled?.remove(publicationDisabledHandler);
+        } catch {}
+      }
+      publicationDisabledHandler = null;
 
       stopLocalSelfCameraPreview();
       await skywayLeave(localMember.value);

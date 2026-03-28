@@ -24,6 +24,30 @@ export async function setRemoteAudioOutput(streamAreaEl, deviceId) {
 }
 
 /**
+ * 指定 memberId のリモート映像タイルにある「🔇」バッジの表示状態を切り替える。
+ *
+ * @param {HTMLElement | null} streamAreaEl リモートタイルを含むコンテナ要素。
+ * @param {string} memberId バッジ表示対象の memberId。
+ * @param {boolean} visible true のとき表示、false のとき非表示。
+ * @returns {void}
+ * @throws {never}
+ * @sideeffects 該当タイルのバッジDOM classList を更新する。
+ */
+export function setRemoteAudioMuteBadgeVisible(streamAreaEl, memberId, visible) {
+	if (!streamAreaEl || !memberId) return;
+
+	const tileEls = Array.from(streamAreaEl.querySelectorAll('[data-member-id]'));
+	for (const tileEl of tileEls) {
+		if (tileEl?.dataset?.memberId !== memberId) continue;
+
+		const badgeEl = tileEl.querySelector('[data-audio-muted-badge="1"]');
+		if (!badgeEl) continue;
+
+		badgeEl.classList.toggle('hidden', !visible);
+	}
+}
+
+/**
  * ローカルタイル用の DOM 要素を再利用または新規作成して返す。
  *
  * @param {object} params
@@ -124,6 +148,13 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 		};
 
 		container.appendChild(enlargeBtn);
+
+		const audioMuteBadge = document.createElement('span');
+		audioMuteBadge.textContent = '🔇';
+		audioMuteBadge.dataset.audioMutedBadge = '1';
+		audioMuteBadge.className =
+			'hidden absolute bottom-2 right-2 bg-black bg-opacity-60 text-white px-1.5 py-0.5 rounded text-xs pointer-events-none';
+		container.appendChild(audioMuteBadge);
 
 		return container;
 	}
