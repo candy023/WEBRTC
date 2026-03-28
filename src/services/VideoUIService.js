@@ -150,7 +150,7 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 		container.appendChild(enlargeBtn);
 
 		const audioMuteBadge = document.createElement('span');
-		audioMuteBadge.textContent = '🔇';
+		audioMuteBadge.textContent = '\u{1F507}';
 		audioMuteBadge.dataset.audioMutedBadge = '1';
 		audioMuteBadge.className =
 			'hidden absolute bottom-2 right-2 bg-black bg-opacity-60 text-white px-1.5 py-0.5 rounded text-xs pointer-events-none';
