@@ -135,7 +135,12 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 
 		container.appendChild(el);
 		stream.attach(el);
-		el.play?.().catch(() => {});
+		el.play?.().catch((error) => {
+			console.warn('remote video play failed', {
+				errorName: error?.name,
+				errorMessage: error?.message,
+			});
+		});
 
 		const enlargeBtn = document.createElement('button');
 		enlargeBtn.innerHTML = '⛶';
@@ -168,7 +173,12 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 		streamAreaEl.appendChild(el);
 		stream.attach(el);
 		applyAudioOutputDevice(el, audioOutputDeviceId);
-		el.play?.().catch(() => {});
+		el.play?.().catch((error) => {
+			console.warn('remote audio play failed', {
+				errorName: error?.name,
+				errorMessage: error?.message,
+			});
+		});
 
 		return el;
 	}

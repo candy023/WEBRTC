@@ -60,8 +60,17 @@ export async function subscribeExisting(room, member, onStream) {
   for (const pub of pubs) {
     if (member?.id && pub.publisher?.id === member.id) continue;
 
-    const { stream } = await member.subscribe(pub.id);
-    onStream(stream, pub);
+    try {
+      const { stream } = await member.subscribe(pub.id);
+      await onStream(stream, pub);
+    } catch (err) {
+      console.warn('subscribeExisting failed', {
+        pubId: pub?.id,
+        contentType: pub?.contentType,
+        publisherId: pub?.publisher?.id,
+        errorMessage: err?.message,
+      });
+    }
   }
 }
 
