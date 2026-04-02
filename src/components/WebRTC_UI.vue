@@ -186,12 +186,12 @@ const mountTileElement = (host, tile, mode = 'camera') => {
 
       <div v-if="screenShareTiles.length > 1" class="space-y-2">
         <div class="text-xs text-gray-600">共有サムネイル</div>
-        <div class="flex gap-2 md:gap-3 overflow-x-auto pb-1">
+        <div class="grid grid-cols-2 gap-2 pb-1 md:flex md:gap-3 md:overflow-x-auto">
           <div
             v-for="tile in shareTilesForList"
             :key="`share-${tile.pubId}`"
             :class="[
-              'shrink-0 min-w-36 md:min-w-44 lg:min-w-48 cursor-pointer rounded p-1',
+              'min-w-0 w-full cursor-pointer rounded p-1 md:w-auto md:shrink-0 md:min-w-44 lg:min-w-48',
               tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
             ]"
             @click="selectedMainSharePubId = tile.pubId"
@@ -210,8 +210,8 @@ const mountTileElement = (host, tile, mode = 'camera') => {
 
       <div class="space-y-2">
         <div class="text-xs text-gray-600">参加者カメラ</div>
-        <div class="flex gap-2 md:gap-3 overflow-x-auto pb-1">
-          <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" class="shrink-0 min-w-32 md:min-w-56 lg:min-w-64">
+        <div class="grid grid-cols-1 gap-2 pb-1 sm:grid-cols-2 md:flex md:gap-3 md:overflow-x-auto">
+          <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" class="min-w-0 md:w-auto md:shrink-0 md:min-w-56 lg:min-w-64">
             <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
             <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
           </div>
