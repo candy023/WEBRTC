@@ -63,6 +63,7 @@
 - 画面共有、ミュート、背景ぼかし、RNNoise は既存フローを壊さない
 - 画面共有や背景ぼかしの修正では、publish / unpublish / 再 attach の順序破壊を避ける
 - 見た目修正では、状態管理や接続処理まで広げない
+- モバイル UI では、主要映像や主要操作を横スクロール前提にしない
 
 ## コメントと文字コード
 - 既存コメントは保持する
@@ -115,6 +116,12 @@
 
 検証できない場合は、実行できなかった内容を明記する。
 
+## Skill 適用ルール
+- 実行時挙動に影響する変更では `code-change-verification` Skill を適用してから作業する
+- WebRTC の接続・購読・late join・画面共有・背景ぼかし・RNNoise の不具合修正では `webrtc-bugfix` Skill を適用してから作業する
+- 見た目や表示文言の最小修正では `ui-minimal-fix` Skill を適用してから作業する
+- `readable-code` Skill が明示された場合は、変更箇所に限ってコメント追加・改善を許可する
+
 ## 完了報告ルール
 完了時は必ず次を簡潔に書く。
 - 変更ファイル
@@ -125,33 +132,3 @@
 ## 曖昧な依頼
 曖昧さがあっても、まず最も狭い妥当解釈を採用する。
 安全な最小修正が不可能な場合だけ確認を挟む。
-
-# AGENTS.md 追記候補
-- 実行時挙動に影響する変更では `code-change-verification` Skill を適用してから作業する
-- WebRTC の接続・購読・late join・画面共有・背景ぼかし・RNNoise の不具合修正では `webrtc-bugfix` Skill を適用してから作業する
-- 見た目や表示文言の最小修正では `ui-minimal-fix` Skill を適用してから作業する
-
-## docs 読み込みルール
-WebRTC の接続仕様、既存挙動、不変条件、確認手順に関わる作業では、必要に応じて次のドキュメントを読んでから作業する。
-
-- `docs/webrtc-current-behavior.md`
-- `docs/webrtc-invariants.md`
-- `docs/webrtc-test-scenarios.md`
-
-以下の作業では、上記 docs を優先して参照する。
-- room 決定ロジックの変更
-- join / leave / publish / subscribe / late join の修正
-- remote stream 表示まわりの修正
-- screen share / background blur / RNNoise の修正
-- 話者ハイライトや participant tile の修正
-- 既存仕様を壊す可能性がある UI 修正
-
-docs に書かれた不変条件を壊す変更は、暗黙修正として扱わず、明示的な仕様変更として扱う。
-docs と実装が食い違う場合は、どちらを正とするかを完了報告で明記する。
-
-- 実行時挙動に影響する変更では `code-change-verification` Skill を適用してから作業する
-- WebRTC の接続・購読・late join・画面共有・背景ぼかし・RNNoise の不具合修正では `webrtc-bugfix` Skill を適用してから作業する
-- 見た目や表示文言の最小修正では `ui-minimal-fix` Skill を適用してから作業する
-- `readable-code` Skill が明示された場合は、変更箇所に限ってコメント追加・改善を許可する
-
-- モバイル UI では、主要映像や主要操作を横スクロール前提にしない
