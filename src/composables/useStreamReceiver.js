@@ -104,6 +104,7 @@ export function useStreamReceiver() {
   let publicationEnabledHandler = null;      // onPublicationEnabled の購読解除に使うハンドラ参照
   let publicationDisabledHandler = null;     // onPublicationDisabled の購読解除に使うハンドラ参照
   const receivedPublicationIds = new Set();  // 受信済み publication の ID を記録（重複 subscribe 防止）
+  const pendingPublicationIds = new Set();   // attach 進行中の publication を記録（新規通知との競合防止）
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
   let localTileContainerEl = null;           // ローカルタイルを再利用するためのコンテナ要素参照
@@ -310,37 +311,69 @@ export function useStreamReceiver() {
   const attachRemote = async (stream, pub) => {
     if (!pub?.id) return;
     if (receivedPublicationIds.has(pub.id)) return;
-    receivedPublicationIds.add(pub.id);
+    if (pendingPublicationIds.has(pub.id)) return;
+    pendingPublicationIds.add(pub.id);
 
-    const el = attachRemoteStream(streamArea.value, stream, pub, {
-      audioOutputDeviceId: selectedAudioOutputId.value
-    });
-    if (el) {
+    try {
+      if (!streamArea.value) {
+        await nextTick();
+      }
+
+      let el = attachRemoteStream(streamArea.value, stream, pub, {
+        audioOutputDeviceId: selectedAudioOutputId.value
+      });
+
+      if (!el && streamArea.value) {
+        await nextTick();
+        el = attachRemoteStream(streamArea.value, stream, pub, {
+          audioOutputDeviceId: selectedAudioOutputId.value
+        });
+      }
+
+      if (!el) {
+        console.warn('remote attach skipped', {
+          pubId: pub?.id,
+          contentType: pub?.contentType,
+          publisherId: pub?.publisher?.id,
+          hasStreamArea: !!streamArea.value,
+          hasVideoTrack: isVideoStream(stream),
+          hasAudioTrack: !!(
+            stream?.track?.kind === 'audio' ||
+            (stream?.mediaStream && stream.mediaStream.getAudioTracks?.().length)
+          ),
+        });
+        return;
+      }
+
+      receivedPublicationIds.add(pub.id);
+
       try {
         if (pub?.id && !el.dataset?.pubId) el.dataset.pubId = pub.id;
       } catch {}
       remoteVideos.value.push(el);
+
+      syncRemoteAudioMuteBadge(pub);
+
+      if (!isVideoStream(stream)) return;
+
+      const tile = {
+        pubId: pub.id,
+        memberId: pub?.publisher?.id || '',
+        label: pub?.publisher?.name || pub?.publisher?.id || '参加者',
+        el,
+        isLocal: false
+      };
+      upsertVideoTile({
+        publication: pub,
+        tile,
+        screenShareTiles: screenShareTiles.value,
+        cameraFilmstripTiles: cameraFilmstripTiles.value,
+      });
+      syncSelectedMainShareState();
+      syncRemoteAudioMuteBadgeByMemberId(pub?.publisher?.id);
+    } finally {
+      pendingPublicationIds.delete(pub.id);
     }
-
-    syncRemoteAudioMuteBadge(pub);
-
-    if (!isVideoStream(stream) || !el) return;
-
-    const tile = {
-      pubId: pub.id,
-      memberId: pub?.publisher?.id || '',
-      label: pub?.publisher?.name || pub?.publisher?.id || '参加者',
-      el,
-      isLocal: false
-    };
-    upsertVideoTile({
-      publication: pub,
-      tile,
-      screenShareTiles: screenShareTiles.value,
-      cameraFilmstripTiles: cameraFilmstripTiles.value,
-    });
-    syncSelectedMainShareState();
-    syncRemoteAudioMuteBadgeByMemberId(pub?.publisher?.id);
   };
 
   // ルームを作成し、URL 共有の起点を確定する
@@ -379,6 +412,7 @@ export function useStreamReceiver() {
     try {
       if (!roomCreated.value || !context.room) await createRoom();
       receivedPublicationIds.clear();
+      pendingPublicationIds.clear();
       screenShareTiles.value = [];
       cameraFilmstripTiles.value = [];
       selectedMainSharePubId.value = null;
@@ -426,6 +460,7 @@ export function useStreamReceiver() {
           setRemoteAudioMuteBadgeVisible(streamArea.value, publication.publisher.id, false);
         }
         receivedPublicationIds.delete(publication.id);
+        pendingPublicationIds.delete(publication.id);
         removeTileByPubId(publication.id);
       });
       publicationEnabledHandler = (event) => {
@@ -533,6 +568,7 @@ export function useStreamReceiver() {
       remoteVideos.value.forEach(el => { try { el?.remove?.(); } catch {} });
       remoteVideos.value = [];
       receivedPublicationIds.clear();
+      pendingPublicationIds.clear();
       screenShareTiles.value = [];
       cameraFilmstripTiles.value = [];
       selectedMainSharePubId.value = null;

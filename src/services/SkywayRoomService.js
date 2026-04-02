@@ -56,7 +56,12 @@ export async function publishLocal(member, { videoStream, audioStream }) {
 export async function subscribeExisting(room, member, onStream) {
   if (!room || !member?.subscribe) return;
 
-  const pubs = room.publications ?? [];
+  let pubs = room.publications ?? [];
+  if (!pubs.length) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    pubs = room.publications ?? [];
+  }
+
   for (const pub of pubs) {
     if (member?.id && pub.publisher?.id === member.id) continue;
 
