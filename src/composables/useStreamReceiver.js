@@ -29,30 +29,28 @@ import {
   enableBackgroundBlur,
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
-import { enumerateDevices, getDefaultSelections } from '../services/DeviceService.js';
 import {
-  attachRemoteStream,
   setRemoteAudioOutput,
-  setRemoteAudioMuteBadgeVisible,
   ensureLocalTileElement,
   enlargeVideo as uiEnlarge,
   shrinkVideo as uiShrink
 } from '../services/VideoUIService.js';
 import {
   isScreenPublication,
-  isVideoStream,
-  removeTileFromList,
-  syncSelectedMainShare,
-  upsertVideoTile,
 } from './helpers/useVideoTiles.js';
 import { useLocalMediaSession } from './useLocalMediaSession.js';
+import { useMediaDevicePanels } from './useMediaDevicePanels.js';
+import { useRemotePublications } from './useRemotePublications.js';
 
 /**
  * WebRTC 画面の state と service 呼び出し順序を管理する orchestrator composable。
  *
+ * UI にはこの composable の公開 state/handler だけを渡し、SkyWay と各 service の呼び出し順序を一元管理する。
+ *
  * @returns {object} UI から利用する state ref と操作関数の集合。
  * @throws {never}
  * @sideeffects SkyWay 接続、メディアデバイス利用、DOM 操作を行う。
+ * @note late join や join/publish/subscribe/leave の順序保証を崩さないため、接続系の操作は本 composable 経由で扱う。
  */
 export function useStreamReceiver() {
 
@@ -64,10 +62,6 @@ export function useStreamReceiver() {
   const joined = ref(false);                 // 参加完了状態（UI 切替用）
   const localMember = ref(null);             // 自分自身の SkyWay Member
   const errorMessage = ref('');              // UI 表示用エラーメッセージ
-  const remoteVideos = ref([]);              // 生成済みリモート映像 DOM の管理配列
-  const screenShareTiles = ref([]);          // 画面共有タイル一覧。メイン共有の選択同期と描画に使う
-  const selectedMainSharePubId = ref(null);  // メイン表示中の共有 pubId。共有削除時のフォールバック判定で使う
-  const cameraFilmstripTiles = ref([]);      // カメラ映像タイル一覧。フィルムストリップ描画と削除同期に使う
   const localVideoEl = ref(null);            // ローカルプレビュー用 video 要素
   const localSelfCameraPreviewEl = ref(null); // 画面共有中の自分カメラプレビュー表示先 video 要素
   const leaving = ref(false);                // leave の多重実行防止フラグ
@@ -78,18 +72,6 @@ export function useStreamReceiver() {
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
   const enlargedVideo = ref(null);           // 現在拡大表示されている video 要素
-  const videoInputDevices = ref([]);         // 利用可能なカメラ一覧
-  const audioInputDevices = ref([]);         // 利用可能なマイク一覧
-  const audioOutputDevices = ref([]);        // 利用可能なスピーカー一覧
-  const selectedVideoInputId = ref('');      // 選択中のカメラ ID
-  const selectedAudioInputId = ref('');      // 選択中のマイク ID
-  const selectedAudioOutputId = ref('');     // 選択中のスピーカー ID
-  const showCameraPanel = ref(false);        // カメラ選択パネルの表示状態
-  const showMicPanel = ref(false);           // マイク選択パネルの表示状態
-  const showSpeakerPanel = ref(false);       // スピーカー選択パネルの表示状態
-  const tempSelectedVideoInputId = ref('');  // 設定画面内の一時的なカメラ選択
-  const tempSelectedAudioInputId = ref('');  // 設定画面内の一時的なマイク選択
-  const tempSelectedAudioOutputId = ref(''); // 設定画面内の一時的なスピーカー選択
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
   const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
 
@@ -103,8 +85,6 @@ export function useStreamReceiver() {
   let streamUnpublishedHandler = null;       // onStreamUnpublished の購読解除に使うハンドラ参照
   let publicationEnabledHandler = null;      // onPublicationEnabled の購読解除に使うハンドラ参照
   let publicationDisabledHandler = null;     // onPublicationDisabled の購読解除に使うハンドラ参照
-  const receivedPublicationIds = new Set();  // 受信済み publication の ID を記録（重複 subscribe 防止）
-  const pendingPublicationIds = new Set();   // attach 進行中の publication を記録（新規通知との競合防止）
   let blurProcessor = null;                  // 背景ぼかしの Processor 参照
   let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
   let localTileContainerEl = null;           // ローカルタイルを再利用するためのコンテナ要素参照
@@ -126,13 +106,6 @@ export function useStreamReceiver() {
     } catch {}
   };
 
-  const syncSelectedMainShareState = () => {
-    selectedMainSharePubId.value = syncSelectedMainShare(
-      selectedMainSharePubId.value,
-      screenShareTiles.value
-    );
-  };
-
   const handleLocalTileEnlarge = (videoEl) => {
     try {
       uiEnlarge(videoEl);
@@ -149,34 +122,6 @@ export function useStreamReceiver() {
     localTileContainerEl = containerEl;
     localTileVideoEl = videoEl;
     return { containerEl, videoEl };
-  };
-
-  const removeTileByPubId = (pubId) => {
-    if (!pubId) return;
-
-    const removedScreenTile = removeTileFromList(screenShareTiles.value, pubId);
-    const removedCameraTile = removeTileFromList(cameraFilmstripTiles.value, pubId);
-    const removedTile = removedScreenTile || removedCameraTile;
-
-    if (removedTile?.el && !removedTile.isLocal) {
-      try {
-        removedTile.el.remove?.();
-      } catch {}
-    }
-
-    remoteVideos.value = remoteVideos.value.filter((el) => el !== removedTile?.el);
-
-    if (!removedTile) {
-      const fallbackEl = remoteVideos.value.find((el) => el?.dataset?.pubId === pubId);
-      if (fallbackEl) {
-        try {
-          fallbackEl.remove?.();
-        } catch {}
-        remoteVideos.value = remoteVideos.value.filter((el) => el !== fallbackEl);
-      }
-    }
-
-    syncSelectedMainShareState();
   };
 
   const syncLocalVideoTile = () => {
@@ -237,43 +182,111 @@ export function useStreamReceiver() {
     blurProcessor = nextBlurProcessor;
   };
 
-  const isRemoteAudioPublication = (publication) => {
-    if (!publication) return false;
-    if (publication.contentType !== 'audio') return false;
-
-    const publisherId = publication.publisher?.id;
-    if (!publisherId) return false;
-    if (localMember.value?.id && publisherId === localMember.value.id) return false;
-
-    return true;
+  // useMediaDevicePanels の speaker 確定時に呼ばれる bridge callback。既存 remote audio へ出力先を再適用する処理は streamArea を保持する orchestrator 側で実行する必要がある。
+  const onSpeakerSelectionConfirmed = async (deviceId) => {
+    try {
+      await setRemoteAudioOutput(streamArea.value, deviceId);
+    } catch (e) {
+      errorMessage.value = e?.message || String(e);
+    }
   };
 
-  const syncRemoteAudioMuteBadge = (publication) => {
-    if (!isRemoteAudioPublication(publication)) return;
+  // useMediaDevicePanels の camera 確定時に使う bridge handler 参照。useLocalMediaSession 初期化前に受け渡しが必要なため、先に no-op で定義して後段で実体を差し込む。
+  let startLocalSelfCameraPreviewHandler = async () => {};
 
-    setRemoteAudioMuteBadgeVisible(
-      streamArea.value,
-      publication.publisher.id,
-      publication.state === 'disabled'
-    );
-  };
+  // 分離済みの device panel state と操作群。orchestrator 側の公開 API shape を維持したまま bridge 経由で受け取る。
+  const {
+    // 設定 UI で表示するカメラ候補一覧。パネル描画時に参照する。
+    videoInputDevices,
+    // 設定 UI で表示するマイク候補一覧。パネル描画時に参照する。
+    audioInputDevices,
+    // 設定 UI で表示するスピーカー候補一覧。パネル描画時に参照する。
+    audioOutputDevices,
+    // join 時のカメラ入力制約に使う確定済み camera deviceId。
+    selectedVideoInputId,
+    // join 時の音声入力制約に使う確定済み microphone deviceId。
+    selectedAudioInputId,
+    // remote audio 再出力先の指定に使う確定済み speaker deviceId。
+    selectedAudioOutputId,
+    // カメラ設定 panel の開閉 state。UI 表示制御に使う。
+    showCameraPanel,
+    // マイク設定 panel の開閉 state。UI 表示制御に使う。
+    showMicPanel,
+    // スピーカー設定 panel の開閉 state。UI 表示制御に使う。
+    showSpeakerPanel,
+    // カメラ panel 内の仮選択。confirm まで確定値を汚さないために使う。
+    tempSelectedVideoInputId,
+    // マイク panel 内の仮選択。confirm まで確定値を汚さないために使う。
+    tempSelectedAudioInputId,
+    // スピーカー panel 内の仮選択。confirm まで確定値を汚さないために使う。
+    tempSelectedAudioOutputId,
+    // 初回 mount 時に device 一覧と既定選択を初期化する handler。
+    initializeMediaDevices,
+    // カメラ panel を開く handler。UI 操作から直接呼ばれる。
+    openCameraPanel,
+    // カメラ panel を閉じる handler。確定値は維持したまま編集を中断する。
+    cancelCameraPanel,
+    // カメラ panel の仮選択を確定する handler。必要時は self preview 更新へ橋渡しする。
+    confirmCameraPanel,
+    // マイク panel を開く handler。UI 操作から直接呼ばれる。
+    openMicPanel,
+    // マイク panel を閉じる handler。確定値は維持したまま編集を中断する。
+    cancelMicPanel,
+    // マイク panel の仮選択を確定する handler。次回 join/publish 制約へ反映する。
+    confirmMicPanel,
+    // スピーカー panel を開く handler。UI 操作から直接呼ばれる。
+    openSpeakerPanel,
+    // スピーカー panel を閉じる handler。確定値は維持したまま編集を中断する。
+    cancelSpeakerPanel,
+    // スピーカー panel の仮選択を確定する handler。remote audio 出力先再適用を bridge callback へ委譲する。
+    confirmSpeakerPanel,
+  } = useMediaDevicePanels({
+    // camera 確定時に self preview 更新要否を判定するため、画面共有 state を panel 側へ渡す。
+    isScreenSharing,
+    // useLocalMediaSession で確定する実体を遅延バインドし、screen share 中の camera 再選択で再利用する。
+    startLocalSelfCameraPreview: () => startLocalSelfCameraPreviewHandler(),
+    // speaker 確定時に remote audio の出力先再適用を orchestrator 側で実行する bridge callback。
+    onSpeakerSelectionConfirmed,
+  });
 
-  const syncRemoteAudioMuteBadgeByMemberId = (memberId) => {
-    if (!memberId || !context.room) return;
-
-    const memberAudioPublication = (context.room.publications ?? []).find(
-      (publication) => (
-        publication?.contentType === 'audio' &&
-        publication?.publisher?.id === memberId
-      )
-    );
-
-    setRemoteAudioMuteBadgeVisible(
-      streamArea.value,
-      memberId,
-      memberAudioPublication?.state === 'disabled'
-    );
-  };
+  // remote publication / remote tile 管理を担当する sub composable。orchestrator 側は高レベルフロー制御に専念する。
+  const {
+    // 生成済み remote 要素配列。leave 時の一括 cleanup と fallback 探索に使う。
+    remoteVideos,
+    // 共有画面タイル一覧。主表示選択と共有帯描画に使う。
+    screenShareTiles,
+    // 現在主表示中の共有 pubId。共有削除時のフォールバック判定に使う。
+    selectedMainSharePubId,
+    // 参加者カメラタイル一覧。フィルムストリップ描画と削除同期に使う。
+    cameraFilmstripTiles,
+    // 共有タイル一覧と主表示 pubId の整合を保つ handler。local tile 更新後にも使う。
+    syncSelectedMainShareState,
+    // pubId 指定で remote tile/DOM を除去する handler。unpublish と local unpublish cleanup で使う。
+    removeTileByPubId,
+    // publication が remote audio かを判定する handler。self publication 除外に使う。
+    isRemoteAudioPublication,
+    // publication state から remote audio mute badge を再同期する handler。enabled/disabled イベントで使う。
+    syncRemoteAudioMuteBadge,
+    // publication 削除時に remote audio mute badge を非表示へ戻す handler。
+    hideRemoteAudioMuteBadge,
+    // remote stream の attach/tile upsert/pubId 管理をまとめて行う handler。subscribeExisting と onStreamPublished から共通利用する。
+    attachRemote,
+    // publication 削除時に重複防止 tracking を解除する handler。
+    removePublicationTracking,
+    // join 前に remote 受信追跡と tile state を初期化する handler。
+    resetRemotePublicationsForJoin,
+    // leave 時に remote DOM と remote publication/tile state を完全初期化する handler。
+    cleanupRemotePublicationsForLeave,
+  } = useRemotePublications({
+    // remote attach や mute badge 更新の対象になる表示先コンテナ。
+    streamArea,
+    // self publication 判定に使う local member 参照。
+    localMember,
+    // remote audio attach 時に使う現在の speaker deviceId。
+    selectedAudioOutputId,
+    // mute badge 再同期時に publication 一覧を参照するための room getter。
+    getCurrentRoom: () => context.room,
+  });
 
   // ローカルメディア操作（画面共有/背景ぼかし/ローカルプレビュー）の委譲先。
   const localMediaSessionHandlers = useLocalMediaSession({
@@ -307,74 +320,8 @@ export function useStreamReceiver() {
     stopLocalSelfCameraPreview,
     startLocalSelfCameraPreview,
   } = localMediaSessionHandlers;
-
-  const attachRemote = async (stream, pub) => {
-    if (!pub?.id) return;
-    if (receivedPublicationIds.has(pub.id)) return;
-    if (pendingPublicationIds.has(pub.id)) return;
-    pendingPublicationIds.add(pub.id);
-
-    try {
-      if (!streamArea.value) {
-        await nextTick();
-      }
-
-      let el = attachRemoteStream(streamArea.value, stream, pub, {
-        audioOutputDeviceId: selectedAudioOutputId.value
-      });
-
-      if (!el && streamArea.value) {
-        await nextTick();
-        el = attachRemoteStream(streamArea.value, stream, pub, {
-          audioOutputDeviceId: selectedAudioOutputId.value
-        });
-      }
-
-      if (!el) {
-        console.warn('remote attach skipped', {
-          pubId: pub?.id,
-          contentType: pub?.contentType,
-          publisherId: pub?.publisher?.id,
-          hasStreamArea: !!streamArea.value,
-          hasVideoTrack: isVideoStream(stream),
-          hasAudioTrack: !!(
-            stream?.track?.kind === 'audio' ||
-            (stream?.mediaStream && stream.mediaStream.getAudioTracks?.().length)
-          ),
-        });
-        return;
-      }
-
-      receivedPublicationIds.add(pub.id);
-
-      try {
-        if (pub?.id && !el.dataset?.pubId) el.dataset.pubId = pub.id;
-      } catch {}
-      remoteVideos.value.push(el);
-
-      syncRemoteAudioMuteBadge(pub);
-
-      if (!isVideoStream(stream)) return;
-
-      const tile = {
-        pubId: pub.id,
-        memberId: pub?.publisher?.id || '',
-        label: pub?.publisher?.name || pub?.publisher?.id || '参加者',
-        el,
-        isLocal: false
-      };
-      upsertVideoTile({
-        publication: pub,
-        tile,
-        screenShareTiles: screenShareTiles.value,
-        cameraFilmstripTiles: cameraFilmstripTiles.value,
-      });
-      syncSelectedMainShareState();
-      syncRemoteAudioMuteBadgeByMemberId(pub?.publisher?.id);
-    } finally {
-      pendingPublicationIds.delete(pub.id);
-    }
-  };
+  // panel 側へ渡した bridge handler 参照へ実体を接続し、camera 再選択時に local self preview 更新を呼べるようにする。
+  startLocalSelfCameraPreviewHandler = startLocalSelfCameraPreview;
 
   // ルームを作成し、URL 共有の起点を確定する
   /**
@@ -411,11 +358,7 @@ export function useStreamReceiver() {
 
     try {
       if (!roomCreated.value || !context.room) await createRoom();
-      receivedPublicationIds.clear();
-      pendingPublicationIds.clear();
-      screenShareTiles.value = [];
-      cameraFilmstripTiles.value = [];
-      selectedMainSharePubId.value = null;
+      resetRemotePublicationsForJoin();
 
       const member = await skywayJoin(context.room);
       localMember.value = member;
@@ -457,10 +400,9 @@ export function useStreamReceiver() {
         const publication = event?.publication;
         if (!publication?.id) return;
         if (isRemoteAudioPublication(publication)) {
-          setRemoteAudioMuteBadgeVisible(streamArea.value, publication.publisher.id, false);
+          hideRemoteAudioMuteBadge(publication);
         }
-        receivedPublicationIds.delete(publication.id);
-        pendingPublicationIds.delete(publication.id);
+        removePublicationTracking(publication.id);
         removeTileByPubId(publication.id);
       });
       publicationEnabledHandler = (event) => {
@@ -565,13 +507,7 @@ export function useStreamReceiver() {
       stopLocalSelfCameraPreview();
       await skywayLeave(localMember.value);
 
-      remoteVideos.value.forEach(el => { try { el?.remove?.(); } catch {} });
-      remoteVideos.value = [];
-      receivedPublicationIds.clear();
-      pendingPublicationIds.clear();
-      screenShareTiles.value = [];
-      cameraFilmstripTiles.value = [];
-      selectedMainSharePubId.value = null;
+      cleanupRemotePublicationsForLeave();
 
       try { localVideoEl.value?.pause?.(); } catch {}
       try {
@@ -696,111 +632,6 @@ export function useStreamReceiver() {
     isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
   };
 
-  // カメラ選択パネルの開閉と確定
-  /**
-   * カメラ選択パネルを開く。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showCameraPanel / tempSelectedVideoInputId を更新する。
-   */
-  const openCameraPanel = () => {
-    showCameraPanel.value = true;
-    tempSelectedVideoInputId.value = selectedVideoInputId.value;
-  };
-  /**
-   * カメラ選択パネルを閉じる。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showCameraPanel を更新する。
-   */
-  const cancelCameraPanel = () => { showCameraPanel.value = false; };
-  /**
-   * カメラ選択パネルの選択を確定する。
-   *
-   * @returns {Promise<void>}
-   * @throws {never}
-   * @sideeffects selectedVideoInputId とプレビュー表示を更新する。
-   */
-  const confirmCameraPanel = async () => {
-    selectedVideoInputId.value = tempSelectedVideoInputId.value;
-    showCameraPanel.value = false;
-    if (isScreenSharing.value) {
-      await startLocalSelfCameraPreview();
-    }
-  };
-
-  // マイク選択パネルの開閉と確定
-  /**
-   * マイク選択パネルを開く。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showMicPanel / tempSelectedAudioInputId を更新する。
-   */
-  const openMicPanel = () => {
-    showMicPanel.value = true;
-    tempSelectedAudioInputId.value = selectedAudioInputId.value;
-  };
-  /**
-   * マイク選択パネルを閉じる。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showMicPanel を更新する。
-   */
-  const cancelMicPanel = () => { showMicPanel.value = false; };
-  /**
-   * マイク選択パネルの選択を確定する。
-   *
-   * @returns {Promise<void>}
-   * @throws {never}
-   * @sideeffects selectedAudioInputId を更新する。
-   */
-  const confirmMicPanel = async () => {
-    selectedAudioInputId.value = tempSelectedAudioInputId.value;
-    showMicPanel.value = false;
-  };
-
-  // スピーカー選択パネルの開閉と確定
-  /**
-   * スピーカー選択パネルを開く。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showSpeakerPanel / tempSelectedAudioOutputId を更新する。
-   */
-  const openSpeakerPanel = () => {
-    showSpeakerPanel.value = true;
-    tempSelectedAudioOutputId.value = selectedAudioOutputId.value;
-  };
-  /**
-   * スピーカー選択パネルを閉じる。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects showSpeakerPanel を更新する。
-   */
-  const cancelSpeakerPanel = () => { showSpeakerPanel.value = false; };
-  /**
-   * スピーカー選択パネルの選択を確定し、出力先を再適用する。
-   *
-   * @returns {Promise<void>}
-   * @throws {never}
-   * @sideeffects selectedAudioOutputId と既存 remote audio 要素の sinkId を更新する。
-   */
-  const confirmSpeakerPanel = async () => {
-    selectedAudioOutputId.value = tempSelectedAudioOutputId.value;
-    showSpeakerPanel.value = false;
-
-    try {
-      await setRemoteAudioOutput(streamArea.value, selectedAudioOutputId.value);
-    } catch (e) {
-      errorMessage.value = e?.message || String(e);
-    }
-  };
-
   // 映像を全画面表示する
   /**
    * 指定 video 要素を全画面オーバーレイ表示へ移す。
@@ -831,16 +662,7 @@ export function useStreamReceiver() {
   // 初期化処理（デバイス取得・URL クエリ反映）
   onMounted(async () => {
     try {
-      const devices = await enumerateDevices();
-
-      videoInputDevices.value = devices.videoInputDevices;
-      audioInputDevices.value = devices.audioInputDevices;
-      audioOutputDevices.value = devices.audioOutputDevices;
-
-      const sel = getDefaultSelections(devices);
-      selectedVideoInputId.value = sel.selectedVideoInputId;
-      selectedAudioInputId.value = sel.selectedAudioInputId;
-      selectedAudioOutputId.value = sel.selectedAudioOutputId;
+      await initializeMediaDevices();
 
       const qRoom = new URLSearchParams(window.location.search).get('room');
       if (qRoom) roomId.value = qRoom;
