@@ -21,6 +21,8 @@ import {
  * @param {import('vue').Ref<any>} params.localMember self publication 判定に使う local member。
  * @param {import('vue').Ref<string>} params.selectedAudioOutputId remote audio attach 時の出力先 deviceId。
  * @param {() => any} params.getCurrentRoom 現在の room 参照を取得する callback。
+ * @param {(memberId: string, stream: any, publication: any) => void} [params.onRemoteAudioAttached] remote audio attach 完了時 callback。
+ * @param {(memberId: string, publication: any) => void} [params.onRemoteAudioPublicationRemoved] remote audio publication removal 時 callback。
  * @returns {{
  *   remoteVideos: import('vue').Ref<any[]>,
  *   screenShareTiles: import('vue').Ref<any[]>,
@@ -46,6 +48,8 @@ export function useRemotePublications({
   localMember,
   selectedAudioOutputId,
   getCurrentRoom,
+  onRemoteAudioAttached = () => {},
+  onRemoteAudioPublicationRemoved = () => {},
 }) {
   // 生成済み remote 要素を保持する配列。leave 時の一括 remove と fallback 探索に使う。
   const remoteVideos = ref([]);
@@ -147,6 +151,7 @@ export function useRemotePublications({
     if (!isRemoteAudioPublication(publication)) return;
 
     setRemoteAudioMuteBadgeVisible(streamArea.value, publication.publisher.id, false);
+    onRemoteAudioPublicationRemoved(publication.publisher.id, publication);
   };
 
   // remote publication を attach し、受信重複防止・tile upsert・pubId 付与を一貫して行う。
@@ -196,7 +201,12 @@ export function useRemotePublications({
 
       syncRemoteAudioMuteBadge(pub);
 
-      if (!isVideoStream(stream)) return;
+      if (!isVideoStream(stream)) {
+        if (isRemoteAudioPublication(pub)) {
+          onRemoteAudioAttached(pub?.publisher?.id || '', stream, pub);
+        }
+        return;
+      }
 
       const tile = {
         pubId: pub.id,

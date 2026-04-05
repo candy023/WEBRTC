@@ -21,6 +21,7 @@ import { useLocalVideoTileSession } from './useLocalVideoTileSession.js';
 import { useMediaDevicePanels } from './useMediaDevicePanels.js';
 import { useRemotePublications } from './useRemotePublications.js';
 import { useRoomSession } from './useRoomSession.js';
+import { useSpeakingHighlightSession } from './useSpeakingHighlightSession.js';
 
 /**
  * WebRTC 画面の state と service 呼び出し順序を管理する orchestrator composable。
@@ -85,6 +86,14 @@ export function useStreamReceiver() {
 
   // useMediaDevicePanels の camera 確定時に使う bridge handler 参照。useLocalMediaSession 初期化前に受け渡しが必要なため、先に no-op で定義して後段で実体を差し込む。
   let startLocalSelfCameraPreviewHandler = async () => {};
+
+  const {
+    startSpeakingMonitor,
+    stopSpeakingMonitor,
+    cleanupSpeakingMonitors,
+  } = useSpeakingHighlightSession({
+    streamArea,
+  });
 
   // 分離済みの device panel state と操作群。orchestrator 側の公開 API shape を維持したまま bridge 経由で受け取る。
   const {
@@ -178,6 +187,10 @@ export function useStreamReceiver() {
     selectedAudioOutputId,
     // mute badge 再同期時に publication 一覧を参照するための room getter。
     getCurrentRoom: () => context.room,
+    // remote audio attach 完了時に memberId ごとの話者監視を開始する callback。
+    onRemoteAudioAttached: startSpeakingMonitor,
+    // remote audio publication 削除時に memberId ごとの話者監視を停止する callback。
+    onRemoteAudioPublicationRemoved: stopSpeakingMonitor,
   });
 
   // local tile / blur / metadata glue を担当する sub composable。orchestrator 側は room lifecycle と UI 公開 API shape の維持に専念する。
@@ -323,6 +336,10 @@ export function useStreamReceiver() {
     cleanupRemotePublicationsForLeave,
     // leave 時にローカル映像 stream を解放する callback。
     releaseLocalVideoStream,
+    // join 完了後に local member の話者監視を開始する callback。
+    onJoinCompleted: startSpeakingMonitor,
+    // leave finally で話者監視を一括停止する callback。
+    onLeaveFinally: cleanupSpeakingMonitors,
   });
 
   // マイクのミュート切替
@@ -455,7 +472,9 @@ export function useStreamReceiver() {
     }
   });
 
-  onUnmounted(() => {});
+  onUnmounted(() => {
+    cleanupSpeakingMonitors();
+  });
 
   // UI コンポーネントに公開する状態と操作一覧
   return {

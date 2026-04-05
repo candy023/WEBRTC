@@ -59,6 +59,8 @@ import { setupRnnoise } from '../services/RnnoiseService.js';
  * @param {() => void} params.stopLocalSelfCameraPreview self camera preview 停止 callback。
  * @param {() => void} params.cleanupRemotePublicationsForLeave leave 時の remote cleanup callback。
  * @param {() => void} params.releaseLocalVideoStream ローカル video stream 解放 callback。
+ * @param {(memberId: string, audioStream: any) => void} [params.onJoinCompleted] join 完了後 callback。
+ * @param {() => void} [params.onLeaveFinally] leave finally callback。
  * @returns {{
  *   createRoom: () => Promise<void>,
  *   joinRoom: () => Promise<void>,
@@ -103,6 +105,8 @@ export function useRoomSession({
   stopLocalSelfCameraPreview,
   cleanupRemotePublicationsForLeave,
   releaseLocalVideoStream,
+  onJoinCompleted = () => {},
+  onLeaveFinally = () => {},
 }) {
   // onStreamPublished の購読解除に使う handler 参照。join/leave 境界で必ず reset する。
   let streamPublishedHandler = null;
@@ -269,6 +273,7 @@ export function useRoomSession({
       await subscribeExisting(context.room, member, async (stream, publication) => {
         await attachRemote(stream, publication);
       });
+      onJoinCompleted(localMember.value?.id || '', localAudioPublication.value?.stream);
 
     } catch (error) {
       setErrorMessage(error?.message || String(error));
@@ -319,6 +324,7 @@ export function useRoomSession({
     } catch (error) {
       setErrorMessage(error?.message || String(error));
     } finally {
+      onLeaveFinally();
       leaving.value = false;
     }
   };
