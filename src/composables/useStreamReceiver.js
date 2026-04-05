@@ -90,6 +90,7 @@ export function useStreamReceiver() {
   const {
     startSpeakingMonitor,
     stopSpeakingMonitor,
+    updateVadLevel,
     cleanupSpeakingMonitors,
   } = useSpeakingHighlightSession({
     streamArea,
@@ -336,6 +337,8 @@ export function useStreamReceiver() {
     cleanupRemotePublicationsForLeave,
     // leave 時にローカル映像 stream を解放する callback。
     releaseLocalVideoStream,
+    // ローカル RNNoise から受けた VAD 値を話者監視へ橋渡しする callback。
+    onLocalVadValue: updateVadLevel,
     // join 完了後に local member の話者監視を開始する callback。
     onJoinCompleted: startSpeakingMonitor,
     // leave finally で話者監視を一括停止する callback。

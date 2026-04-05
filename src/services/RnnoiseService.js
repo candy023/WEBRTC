@@ -7,7 +7,8 @@
 
 import { Rnnoise } from '@shiguredo/rnnoise-wasm';
 
-export async function setupRnnoise(audioDeviceId) {
+export async function setupRnnoise(audioDeviceId, options = {}) {
+	const { onVad = () => {} } = options;
 
 	// ============================
 	// ① フォールバック用の標準オーディオ設定
@@ -49,8 +50,14 @@ export async function setupRnnoise(audioDeviceId) {
 		
 		// ⑥ Worklet からのメッセージ受信（VADなど）
 		rnnoiseNode.port.onmessage = (ev) => {
-			// 呼び出し側で ev.data をそのまま扱えるようにする
-			// （このファイルでは処理しない）
+			try {
+				if (ev?.data?.type === 'vad') {
+					const value = Number(ev?.data?.value);
+					if (Number.isFinite(value)) {
+						onVad(value);
+					}
+				}
+			} catch {}
 		};
 
 	

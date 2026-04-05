@@ -197,6 +197,14 @@ export function highlightSpeaking(containerEl, speaking) {
 		containerEl.classList.add('speaking');
 		containerEl.style.outline = '3px solid #22c55e';
 		containerEl.style.boxShadow = '0 0 8px #22c55e';
+		if (import.meta?.env?.DEV) {
+			console.debug('[highlightSpeaking:true]', {
+				memberId: containerEl?.dataset?.memberId || '',
+				tagName: containerEl?.tagName || '',
+				className: containerEl?.className || '',
+				style: containerEl?.getAttribute?.('style') || '',
+			});
+		}
 	} else {
 		containerEl.classList.remove('speaking');
 		containerEl.style.outline = '';
