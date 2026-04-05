@@ -2,6 +2,7 @@
 // このコンポーネントは UI 表示に専念します。
 // - 実際の WebRTC / SkyWay の接続やメディア処理は `useStreamReceiver` と各 services に委譲しています。
 // - ここでは「なぜその ref/関数が必要か」を示すコメントを残し、UI 側の意図を明確にします。
+import { computed } from 'vue';
 import { useStreamReceiver } from '../composables/useStreamReceiver.js';
 const {
   // `streamArea`: remote 映像が差し込まれるコンテナ。VideoUIService が DOM を生成してここに挿入します。
@@ -17,8 +18,12 @@ const {
   errorMessage,
   // VideoUIService が挿入した remote タイルの参照リスト。UI 側でのクリーンアップに利用
   remoteVideos,
+  screenShareTiles,
+  selectedMainSharePubId,
+  cameraFilmstripTiles,
   // ローカルプレビューの video 要素。UI が直接 DOM 参照を持つ理由は、サービス側で attach するため
   localVideoEl,
+  localSelfCameraPreviewEl,
   leaving,
   // ミュート・共有・背景ぼかしなど UI 表示用フラグ。実際のトグル処理はサービス側で行うためここでは同期表示用途に限定
   isAudioMuted,
@@ -69,6 +74,77 @@ const {
   enlargeVideo,
   shrinkVideo,
 } = useStreamReceiver();
+
+const selectedMainShareTile = computed(() => {
+  if (!selectedMainSharePubId.value) return null;
+  return screenShareTiles.value.find((tile) => tile.pubId === selectedMainSharePubId.value) || null;
+});
+
+const shareTilesForList = computed(() => {
+  return screenShareTiles.value;
+});
+
+const hasMainShare = computed(() => {
+  return !!selectedMainShareTile.value;
+});
+
+const roomLayoutClass = computed(() => {
+  return hasMainShare.value
+    ? 'space-y-4 md:space-y-5 lg:grid lg:grid-cols-5 lg:gap-3 lg:items-start lg:space-y-0'
+    : 'space-y-4 md:space-y-5';
+});
+
+const shareAreaClass = computed(() => {
+  return hasMainShare.value ? 'space-y-4 md:space-y-5 lg:col-span-4' : 'space-y-4 md:space-y-5';
+});
+
+const cameraAreaClass = computed(() => {
+  return hasMainShare.value ? 'space-y-2 lg:col-span-1' : 'space-y-2';
+});
+
+const cameraGridClass = computed(() => {
+  return hasMainShare.value
+    ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-1'
+    : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4';
+});
+
+const hasLocalCameraTile = computed(() => {
+  return cameraFilmstripTiles.value.some((tile) => tile?.isLocal);
+});
+
+const shouldShowSelfPreviewTile = computed(() => {
+  return joined.value && isScreenSharing.value && !hasLocalCameraTile.value;
+});
+
+const cameraTileClass = (tile) => {
+  if (!tile?.isLocal) return 'min-w-0';
+
+  return hasMainShare.value
+    ? 'min-w-0 w-3/4 justify-self-start sm:w-2/3 lg:w-full lg:max-w-[180px]'
+    : 'min-w-0 w-4/5 justify-self-start sm:w-3/4 lg:w-[72%] xl:w-[68%]';
+};
+
+const applyTileVideoMode = (tile, mode) => {
+  const videoEl = tile?.el?.querySelector?.('video');
+  if (!videoEl) return;
+
+  if (mode === 'main' || mode === 'share') {
+    videoEl.classList.remove('object-cover');
+    videoEl.classList.add('object-contain');
+    return;
+  }
+
+  videoEl.classList.remove('object-contain');
+  videoEl.classList.add('object-cover');
+};
+
+const mountTileElement = (host, tile, mode = 'camera') => {
+  if (!host || !tile?.el) return;
+  applyTileVideoMode(tile, mode);
+  if (tile.el.parentNode !== host) {
+    host.replaceChildren(tile.el);
+  }
+};
 </script>
 
 <template>
@@ -81,23 +157,25 @@ const {
           <button v-if="roomId && !joined" :disabled="joining || leaving" @click="joinRoom" class="px-3 py-1.5 rounded bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">{{ joining ? '参加中…' : '参加' }}</button>
           <button v-if="joined" :disabled="leaving" @click="leaveRoom" class="px-3 py-1.5 rounded bg-gray-600 text-white text-sm hover:bg-gray-700 disabled:opacity-50">{{ leaving ? '退出中…' : '退出' }}</button>
         </div>
-        <div v-if="joined" class="flex items-center gap-2">
-          <button @click="toggleAudioMute" :title="isAudioMuted ? 'ミュート解除' : 'ミュート'" :class="['px-3 py-1.5 rounded text-sm', isAudioMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">ミュート🎤</button>
-          <button @click="toggleVideoMute" :title="isVideoMuted ? '映像ON' : '映像OFF'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">映像📹</button>
-          <button @click="screenShare" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
-          <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">ぼかし🟣</button>
-          <button @click="toggleRnnoise" :title="'ノイズ抑制(RNNoise)'" :class="['px-3 py-1.5 rounded text-sm', isRnnoiseEnabled ? 'bg紫-600 text-white' : 'bg-purple-200 text-purple-900']">ノイズ抑制</button>
+        <div class="flex items-center gap-2">
+          <button @click="toggleAudioMute" :title="isAudioMuted ? 'マイクをオン' : 'マイクをオフ'" :class="['px-3 py-1.5 rounded text-sm', isAudioMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">マイク</button>
+          <button @click="toggleVideoMute" :title="isVideoMuted ? 'カメラをオン' : 'カメラをオフ'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">カメラ</button>
+          <button @click="screenShare" :disabled="!joined" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
+          <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">{{ isBackgroundBlurred ? '背景ぼかし ON' : '背景ぼかし OFF' }}</button>
+          <button @click="toggleRnnoise" :title="'ノイズ抑制(RNNoise)'" :class="['px-3 py-1.5 rounded text-sm', isRnnoiseEnabled ? 'bg-purple-600 text-white' : 'bg-purple-200 text-purple-900']">ノイズ抑制</button>
         </div>
         <div class="relative">
-          <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">⋮</button>
-          <div v-if="showSettingsOpen" class="absolute right-0 mt-2 w-48 bg白 border rounded shadow z-40">
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openCameraPanel(); showSettingsOpen=false">カメラ切替</button>
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openMicPanel(); showSettingsOpen=false">マイク切替</button>
-            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openSpeakerPanel(); showSettingsOpen=false">スピーカー切替</button>
+          <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">設定</button>
+          <div v-if="showSettingsOpen" class="absolute right-0 mt-2 w-48 bg-white border rounded shadow z-40">
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openCameraPanel(); showSettingsOpen=false">カメラ設定</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openMicPanel(); showSettingsOpen=false">マイク設定</button>
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" @click="openSpeakerPanel(); showSettingsOpen=false">スピーカー設定</button>
           </div>
         </div>
       </div>
       <div v-if="errorMessage" class="mt-2 text-xs text-red-600">{{ errorMessage }}</div>
+      <div class="mt-2 text-xs text-gray-600">カメラ OFF 中も設定は保持されます</div>
+      <div class="mt-1 text-xs text-gray-600">画面共有中は背景処理は無効です</div>
     </header>
 
     <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
@@ -138,16 +216,57 @@ const {
       </div>
     </div>
 
-    <div
-      ref="streamArea"
-      v-if="roomCreated"
-      class="border rounded p-3 max-h-[65vh] overflow-y-auto"
-      style="display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;"
-    >
-      <div v-if="joined" class="relative w-full aspect-video bg-black rounded overflow-hidden">
-        <video ref="localVideoEl" autoplay playsinline muted class="w-full h-full object-cover" />
-        <button @click="enlargeVideo(localVideoEl)" class="absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm">⛶</button>
+    <div v-if="roomCreated" class="space-y-4 md:space-y-5">
+      <div :class="roomLayoutClass">
+        <div :class="shareAreaClass">
+          <div v-if="selectedMainShareTile" class="border rounded p-2 md:p-3 bg-gray-50 relative">
+            <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
+          </div>
+
+          <div v-if="screenShareTiles.length > 1" class="space-y-2">
+            <div class="text-xs text-gray-600">共有サムネイル</div>
+            <div class="grid grid-cols-2 gap-2 pb-1 sm:grid-cols-3 lg:grid-cols-4">
+              <div
+                v-for="tile in shareTilesForList"
+                :key="`share-${tile.pubId}`"
+                :class="[
+                  'min-w-0 w-full cursor-pointer rounded p-1',
+                  tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
+                ]"
+                @click="selectedMainSharePubId = tile.pubId"
+              >
+                <div
+                  v-if="tile.pubId === selectedMainSharePubId"
+                  class="relative w-full aspect-video bg-black rounded overflow-hidden"
+                >
+                  <span class="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/70 text-[10px] leading-none text-white">選択中</span>
+                </div>
+                <div v-else class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'share')" />
+                <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div :class="cameraAreaClass">
+          <div class="text-xs text-gray-600">参加者カメラ</div>
+          <div :class="['grid gap-2 pb-1', cameraGridClass]">
+            <div v-if="shouldShowSelfPreviewTile" :class="cameraTileClass({ isLocal: true })">
+              <div class="relative w-full aspect-video bg-black rounded overflow-hidden border border-white/30">
+                <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
+              </div>
+              <div class="mt-1 text-xs text-gray-600">あなた</div>
+            </div>
+            <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" :class="cameraTileClass(tile)">
+              <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+              <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <div ref="streamArea" class="hidden" />
+      <video ref="localVideoEl" autoplay playsinline muted class="hidden" />
     </div>
     <div v-else class="text-gray-500 italic">まだルームは作成されていません。</div>
   </div>
