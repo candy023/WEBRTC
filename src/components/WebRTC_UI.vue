@@ -84,6 +84,46 @@ const shareTilesForList = computed(() => {
   return screenShareTiles.value;
 });
 
+const hasMainShare = computed(() => {
+  return !!selectedMainShareTile.value;
+});
+
+const roomLayoutClass = computed(() => {
+  return hasMainShare.value
+    ? 'space-y-4 md:space-y-5 lg:grid lg:grid-cols-5 lg:gap-3 lg:items-start lg:space-y-0'
+    : 'space-y-4 md:space-y-5';
+});
+
+const shareAreaClass = computed(() => {
+  return hasMainShare.value ? 'space-y-4 md:space-y-5 lg:col-span-4' : 'space-y-4 md:space-y-5';
+});
+
+const cameraAreaClass = computed(() => {
+  return hasMainShare.value ? 'space-y-2 lg:col-span-1' : 'space-y-2';
+});
+
+const cameraGridClass = computed(() => {
+  return hasMainShare.value
+    ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-1'
+    : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4';
+});
+
+const hasLocalCameraTile = computed(() => {
+  return cameraFilmstripTiles.value.some((tile) => tile?.isLocal);
+});
+
+const shouldShowSelfPreviewTile = computed(() => {
+  return joined.value && isScreenSharing.value && !hasLocalCameraTile.value;
+});
+
+const cameraTileClass = (tile) => {
+  if (!tile?.isLocal) return 'min-w-0';
+
+  return hasMainShare.value
+    ? 'min-w-0 w-3/4 justify-self-start sm:w-2/3 lg:w-full lg:max-w-[180px]'
+    : 'min-w-0 w-4/5 justify-self-start sm:w-3/4 lg:w-[72%] xl:w-[68%]';
+};
+
 const applyTileVideoMode = (tile, mode) => {
   const videoEl = tile?.el?.querySelector?.('video');
   if (!videoEl) return;
@@ -177,43 +217,50 @@ const mountTileElement = (host, tile, mode = 'camera') => {
     </div>
 
     <div v-if="roomCreated" class="space-y-4 md:space-y-5">
-      <div v-if="selectedMainShareTile" class="border rounded p-2 md:p-3 bg-gray-50 relative">
-        <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
-        <div v-if="joined && isScreenSharing" class="absolute bottom-3 right-3 z-10 w-28 md:w-40 lg:w-44 aspect-video rounded overflow-hidden bg-black border border-white/40 shadow">
-          <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
-        </div>
-      </div>
+      <div :class="roomLayoutClass">
+        <div :class="shareAreaClass">
+          <div v-if="selectedMainShareTile" class="border rounded p-2 md:p-3 bg-gray-50 relative">
+            <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
+          </div>
 
-      <div v-if="screenShareTiles.length > 1" class="space-y-2">
-        <div class="text-xs text-gray-600">共有サムネイル</div>
-        <div class="grid grid-cols-2 gap-2 pb-1 md:flex md:gap-3 md:overflow-x-auto">
-          <div
-            v-for="tile in shareTilesForList"
-            :key="`share-${tile.pubId}`"
-            :class="[
-              'min-w-0 w-full cursor-pointer rounded p-1 md:w-auto md:shrink-0 md:min-w-44 lg:min-w-48',
-              tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
-            ]"
-            @click="selectedMainSharePubId = tile.pubId"
-          >
-            <div
-              v-if="tile.pubId === selectedMainSharePubId"
-              class="relative w-full aspect-video bg-black rounded overflow-hidden flex items-center justify-center text-xs text-white"
-            >
-              選択中
+          <div v-if="screenShareTiles.length > 1" class="space-y-2">
+            <div class="text-xs text-gray-600">共有サムネイル</div>
+            <div class="grid grid-cols-2 gap-2 pb-1 sm:grid-cols-3 lg:grid-cols-4">
+              <div
+                v-for="tile in shareTilesForList"
+                :key="`share-${tile.pubId}`"
+                :class="[
+                  'min-w-0 w-full cursor-pointer rounded p-1',
+                  tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
+                ]"
+                @click="selectedMainSharePubId = tile.pubId"
+              >
+                <div
+                  v-if="tile.pubId === selectedMainSharePubId"
+                  class="relative w-full aspect-video bg-black rounded overflow-hidden"
+                >
+                  <span class="absolute top-2 left-2 px-1.5 py-0.5 rounded bg-black/70 text-[10px] leading-none text-white">選択中</span>
+                </div>
+                <div v-else class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'share')" />
+                <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+              </div>
             </div>
-            <div v-else class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'share')" />
-            <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
           </div>
         </div>
-      </div>
 
-      <div class="space-y-2">
-        <div class="text-xs text-gray-600">参加者カメラ</div>
-        <div class="grid grid-cols-1 gap-2 pb-1 sm:grid-cols-2 md:flex md:gap-3 md:overflow-x-auto">
-          <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" class="min-w-0 md:w-auto md:shrink-0 md:min-w-56 lg:min-w-64">
-            <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
-            <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+        <div :class="cameraAreaClass">
+          <div class="text-xs text-gray-600">参加者カメラ</div>
+          <div :class="['grid gap-2 pb-1', cameraGridClass]">
+            <div v-if="shouldShowSelfPreviewTile" :class="cameraTileClass({ isLocal: true })">
+              <div class="relative w-full aspect-video bg-black rounded overflow-hidden border border-white/30">
+                <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
+              </div>
+              <div class="mt-1 text-xs text-gray-600">あなた</div>
+            </div>
+            <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" :class="cameraTileClass(tile)">
+              <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+              <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+            </div>
           </div>
         </div>
       </div>
