@@ -51,6 +51,22 @@ export function useRemotePublications({
   onRemoteAudioAttached = () => {},
   onRemoteAudioPublicationRemoved = () => {},
 }) {
+  const waitForStreamAreaReady = async () => {
+    if (streamArea.value) return streamArea.value;
+
+    for (let i = 0; i < 10; i += 1) {
+      await nextTick();
+      if (streamArea.value) return streamArea.value;
+
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+      if (streamArea.value) return streamArea.value;
+    }
+
+    return streamArea.value;
+  };
+
   // 生成済み remote 要素を保持する配列。leave 時の一括 remove と fallback 探索に使う。
   const remoteVideos = ref([]);
   // 共有画面タイルの一覧。主表示対象の選択同期と画面共有帯の描画に使う。
@@ -162,9 +178,7 @@ export function useRemotePublications({
     pendingPublicationIds.add(pub.id);
 
     try {
-      if (!streamArea.value) {
-        await nextTick();
-      }
+      await waitForStreamAreaReady();
 
       let el = attachRemoteStream(streamArea.value, stream, pub, {
         audioOutputDeviceId: selectedAudioOutputId.value

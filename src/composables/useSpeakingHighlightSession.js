@@ -24,13 +24,16 @@ export function useSpeakingHighlightSession({
   const SPEAKING_POLL_INTERVAL_MS = 150;
   const SPEAKING_THRESHOLD_ON = 0.02;
   const SPEAKING_THRESHOLD_OFF = 0.01;
+  const SPEAKING_LEVEL_THRESHOLD_ON = 0.06;
+  const SPEAKING_LEVEL_THRESHOLD_OFF = 0.03;
+  const SPEAKING_VAD_STALE_MS = 1000;
   const SPEAKING_RMS_HISTORY_LENGTH = 5;
   const speakingMonitors = new Map();
   let audioContext = null;
 
   const debugSpeaking = (label, payload = {}) => {
     if (!isDev) return;
-    console.debug(`[speaking] ${label}`, payload);
+    console.log(`[speaking] ${label}`, payload);
   };
 
   const ensureAudioContext = () => {
@@ -101,6 +104,11 @@ export function useSpeakingHighlightSession({
   const findTileContainerByMemberId = (memberId) => {
     if (!memberId) return null;
 
+    const visibleSpeakingHost = Array.from(
+      document.querySelectorAll('[data-speaking-host="1"][data-member-id]')
+    ).find((tileEl) => tileEl?.dataset?.memberId === memberId);
+    if (visibleSpeakingHost) return visibleSpeakingHost;
+
     if (streamArea.value) {
       const inStreamArea = Array.from(streamArea.value.querySelectorAll('[data-member-id]')).find(
         (tileEl) => tileEl?.dataset?.memberId === memberId
@@ -140,7 +148,16 @@ export function useSpeakingHighlightSession({
     applySpeakingHighlight(memberId, false);
   };
 
-  const updateVadLevel = () => {};
+  const updateVadLevel = (memberId, vadLevel) => {
+    if (!memberId) return;
+
+    const monitor = speakingMonitors.get(memberId);
+    if (!monitor) return;
+
+    if (!Number.isFinite(vadLevel)) return;
+    monitor.vadLevel = vadLevel;
+    monitor.vadUpdatedAt = Date.now();
+  };
 
   const startSpeakingMonitor = (memberId, audioStream) => {
     debugSpeaking('startMonitor', {
@@ -180,6 +197,40 @@ export function useSpeakingHighlightSession({
       analyser: analyserState?.analyser || null,
       dataArray: analyserState?.dataArray || null,
       rmsHistory: [],
+      vadLevel: null,
+      vadUpdatedAt: 0,
+    };
+
+    const readAudioLevel = async () => {
+      const now = Date.now();
+      if (
+        Number.isFinite(monitor.vadLevel) &&
+        monitor.vadUpdatedAt > 0 &&
+        now - monitor.vadUpdatedAt <= SPEAKING_VAD_STALE_MS
+      ) {
+        return {
+          level: monitor.vadLevel,
+          source: 'vad',
+        };
+      }
+
+      const getAudioLevel = audioStream?.getAudioLevel;
+      if (typeof getAudioLevel === 'function') {
+        try {
+          const level = await getAudioLevel.call(audioStream);
+          if (Number.isFinite(level)) {
+            return {
+              level,
+              source: 'audioLevel',
+            };
+          }
+        } catch {}
+      }
+
+      return {
+        level: null,
+        source: 'none',
+      };
     };
 
     const tick = async () => {
@@ -202,10 +253,17 @@ export function useSpeakingHighlightSession({
         const avgRms = monitor.rmsHistory.length
           ? monitor.rmsHistory.reduce((sum, value) => sum + value, 0) / monitor.rmsHistory.length
           : 0;
+        const levelState = await readAudioLevel();
+        const source = levelState.source === 'none' ? 'rms' : levelState.source;
+        const audioLevel = source === 'rms' ? avgRms : (levelState.level ?? 0);
+        const speakingOnThreshold = source === 'rms' ? SPEAKING_THRESHOLD_ON : SPEAKING_LEVEL_THRESHOLD_ON;
+        const speakingOffThreshold = source === 'rms' ? SPEAKING_THRESHOLD_OFF : SPEAKING_LEVEL_THRESHOLD_OFF;
         debugSpeaking('rms', {
           memberId,
           rmsLevel,
           avgRms,
+          source,
+          audioLevel,
           audioContextState: audioContext?.state || '',
           hasAnalyser: !!monitor.analyser,
           historyLength: monitor.rmsHistory.length,
@@ -214,9 +272,9 @@ export function useSpeakingHighlightSession({
 
         const prevSpeaking = monitor.speaking;
         let nextSpeaking = prevSpeaking;
-        if (!prevSpeaking && avgRms >= SPEAKING_THRESHOLD_ON) {
+        if (!prevSpeaking && audioLevel >= speakingOnThreshold) {
           nextSpeaking = true;
-        } else if (prevSpeaking && avgRms < SPEAKING_THRESHOLD_OFF) {
+        } else if (prevSpeaking && audioLevel < speakingOffThreshold) {
           nextSpeaking = false;
         }
 
@@ -226,7 +284,8 @@ export function useSpeakingHighlightSession({
             memberId,
             prevSpeaking,
             nextSpeaking,
-            avgRms,
+            audioLevel,
+            source,
           });
           applySpeakingHighlight(memberId, nextSpeaking);
           return;
