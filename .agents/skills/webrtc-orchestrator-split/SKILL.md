@@ -3,91 +3,7 @@ name: webrtc-orchestrator-split
 description: useStreamReceiver.js を orchestrator として保ったまま、安全に責務分割するときに使う。挙動変更なしを最優先とし、late join、join/leave、screen share、background blur、RNNoise を壊さない。UIだけの修正や whole-file rewrite では使わない。
 ---
 
-$webrtc-orchestrator-split
-
-Before planning, read:
-- .agents/skills/webrtc-orchestrator-split/SKILL.md
-- .agents/skills/readable-code/SKILL.md
-- docs/webrtc-invariants.md
-- docs/webrtc-current-behavior.md
-- docs/webrtc-test-scenarios.md
-
-Task:
-現在の device panel 分割は維持したまま、
-src/composables/useStreamReceiver.js から remote publication / remote tile 管理の責務だけを
-src/composables/useRemotePublications.js に切り出してください。
-
-Scope:
-- 今回は remote publication / remote tile 管理だけを分ける
-- 新しい room 管理や Supabase 連携は入れない
-- UI レイアウト変更はしない
-- 挙動変更は禁止
-
-Change files:
-- src/composables/useStreamReceiver.js
-- src/composables/useRemotePublications.js
-
-Do not touch:
-- src/services/SkywayRoomService.js
-- src/services/MediaStreamService.js
-- src/services/RnnoiseService.js
-- src/services/VideoUIService.js
-- src/composables/useLocalMediaSession.js
-- src/composables/useMediaDevicePanels.js
-- src/composables/helpers/useVideoTiles.js
-- src/components/WebRTC_UI.vue
-
-Split target:
-- attachRemote
-- removeTileByPubId
-- isRemoteAudioPublication
-- syncRemoteAudioMuteBadge
-- syncRemoteAudioMuteBadgeByMemberId
-- receivedPublicationIds
-- pendingPublicationIds
-- remote attach 後の tile upsert と pubId 管理
-
-Keep in useStreamReceiver.js:
-- createRoom / joinRoom / leaveRoom の高レベルな順序制御
-- subscribeExisting / onStreamPublished / onStreamUnpublished の登録と全体フロー
-- local media session 連携
-- roomId, baseUrl, joined/joining/leaving などの上位 state
-- UI へ返す公開 API shape
-
-Readable-code hard rules for touched code:
-- 重要な state / ref / handler / callback は、各定義直前に個別コメント必須
-- グループコメントで複数の重要変数をまとめて説明しない
-- コメントは「何をしているか」より「何を表すか」「どこで使うか」「なぜ必要か」を優先する
-- 公開 composable には、目的・Parameters・Returns・副作用・必要なら Note を含む JSDoc を付ける
-- touched code ではコメント密度を下げない
-
-Hard constraints:
-- late join を壊さない
-- subscribeExisting と onStreamPublished の責務を混ぜない
-- self publication を remote 側で subscribe しない
-- join / leave の接続順序を変えない
-- screen share, background blur, RNNoise は触らない
-- attach 先 DOM 未準備時の nextTick retry を消さない
-- remote audio mute badge を壊さない
-- whole-file rewrite 禁止
-- コメント、日本語文言、既存命名は必要な場合以外変えない
-- 既存の公開 return shape は維持する
-
-Implementation preference:
-- useRemotePublications は remote 側の state と helper を持つ
-- useStreamReceiver.js は orchestrator として、必要な callback / ref を渡して使う
-- 既存 service の責務を新規 composable へ持ち込んで増やしすぎない
-- 1回の変更で 1責務だけ分ける
-
-Output format:
-1. Plan
-2. Files to change
-3. Minimal patch strategy
-4. Risks
-5. Verification
-6. List of important variables/handlers/callbacks that received individual comments
-
-## 目的
+# 目的
 この Skill は、`src/composables/useStreamReceiver.js` を **orchestrator として保ったまま安全に分割する** ためのものである。
 
 目的は次の 3 つに限定する。
@@ -96,7 +12,7 @@ Output format:
 2. 接続順序や既存挙動を壊さずに小さく分割する
 3. 将来の Supabase 連携や room 管理追加に耐えられる構造へ寄せる
 
-この Skill は **大規模リファクタ** のためではない。
+この Skill は **大規模リファクタ** のためではない。  
 **挙動変更なしの責務分割** を最優先にする。
 
 ---
@@ -133,6 +49,15 @@ Output format:
 - whole-file rewrite をしない
 - コメント、文言、日本語テキスト、既存 API shape は必要な場合を除き維持する
 - late join, join / leave, screen share, background blur, RNNoise を保護対象として扱う
+- 分割後も `useStreamReceiver.js` には **順序制御 + 依存注入 + 公開 API の束ね** を残す
+- `useStreamReceiver.js` を「ロジックゼロ」にすることは目的ではない
+
+---
+
+## readable-code 併用方針
+- `readable-code` Skill が併用される場合、touched code の可読性改善は任意ではなく要求仕様として扱う
+- 新規 composable を作る場合、公開 API だけでなく **何を担当し、何を担当しないか** を JSDoc の Note や冒頭説明で明記する
+- 重要な state / ref / handler / callback のコメント密度を、分割前より下げてはならない
 
 ---
 
@@ -146,6 +71,7 @@ Output format:
 - `onStreamPublished` 系は新規 publication の購読責務を持つ
 - self publication を remote 側で subscribe しない
 - publication 重複防止で初回受信を潰さない
+- 「購読開始済み」と「表示成功済み」を同一視しない
 
 ### 2. 表示
 - DOM attach は attach 先が存在するタイミングで行う
@@ -153,6 +79,7 @@ Output format:
 - 共有画面と参加者カメラを同じ責務に戻さない
 - 共有画面がある場合は共有画面を主表示として扱う
 - 話者ハイライトや mute badge を壊さない
+- attach 先 DOM 未準備時の retry を安易に削除しない
 
 ### 3. stream 差し替え
 - publish / unpublish / attach の順序を崩さない
@@ -169,11 +96,12 @@ Output format:
 - service / sub composable の呼び出し順序制御
 - join / leave の高レベルな流れ
 - 各責務モジュール間の接着
+- どうしても sub composable 側へ持ち込めない最小限の bridge callback
 
 `useStreamReceiver.js` から優先的に外す候補は次の通り。
 
 ### 優先度 1: device panel / device selection
-安全に外しやすい。
+安全に外しやすい。  
 接続順序や late join に触れにくい。
 
 対象例:
@@ -197,7 +125,7 @@ Output format:
 - `src/composables/useMediaDeviceState.js`
 
 ### 優先度 2: remote publications / remote tiles
-行数削減効果が大きい。
+行数削減効果が大きい。  
 ただし late join と attach 失敗に直結するため慎重に分ける。
 
 対象例:
@@ -214,12 +142,53 @@ Output format:
 - `src/composables/useRemoteMediaSession.js`
 
 ### 優先度 3: room session
-`createRoom / joinRoom / leaveRoom` 周辺。
-効果は高いが最も壊しやすい。
+`createRoom / joinRoom / leaveRoom` 周辺。  
+効果は高いが最も壊しやすい。  
 優先度 1 と 2 の後に扱う。
+
+対象例:
+- `createRoom`
+- `joinRoom`
+- `leaveRoom`
+- `reflectInitialMuteState`
+- `streamPublishedHandler`
+- `streamUnpublishedHandler`
+- `publicationEnabledHandler`
+- `publicationDisabledHandler`
 
 推奨ファイル名例:
 - `src/composables/useRoomSession.js`
+
+この分割で守ること:
+- `subscribeExisting()` と `onStreamPublished` の責務を混ぜない
+- join / publish / subscribe / leave の順序を変えない
+- self publication を remote 側で subscribe しない
+- `useRoomSession.js` に local tile DOM 管理を入れない
+- `useRoomSession.js` に remote attach 実装本体を入れない
+- `useRoomSession.js` は room lifecycle と event bind / unbind に責務を限定する
+
+### 優先度 4: local tile / blur / metadata glue
+room session を分けた後でも `useStreamReceiver.js` に残りやすい local glue を分離する。
+
+対象例:
+- `syncLocalVideoTile`
+- `ensureLocalTileRefs`
+- `updateLocalVideoPublicationMetadata`
+- `getLocalTileElements`
+- `setLocalTileElements`
+- `getBlurProcessor`
+- `setBlurProcessor`
+- `releaseLocalVideoStream`
+
+推奨ファイル名例:
+- `src/composables/useLocalVideoTileSession.js`
+- `src/composables/useLocalVideoPresentation.js`
+
+この分割で守ること:
+- local preview / local tile / metadata の glue だけを扱う
+- room lifecycle を持ち込まない
+- remote attach / mute badge / dedupe を持ち込まない
+- `useLocalMediaSession.js` と責務を重ねすぎない
 
 ### 既存維持
 すでに分離済みの責務は戻さない。
@@ -248,7 +217,7 @@ room 管理や presence 管理の境界は service に置く。
 - `joinRoomMember(roomId, memberId)`
 - `leaveRoomMember(roomId, memberId)`
 
-今の段階では Supabase を先に実装しなくてよい。
+今の段階では Supabase を先に実装しなくてよい。  
 まずは orchestrator の責務整理を優先する。
 
 ---
@@ -261,6 +230,7 @@ room 管理や presence 管理の境界は service に置く。
 - 同一責務の小さなまとまりの移動
 - 必要最小限の import / export 更新
 - 変更箇所に限った JSDoc の追加または維持
+- 新規 composable 冒頭に責務境界の説明を追加すること
 
 ---
 
@@ -277,6 +247,7 @@ room 管理や presence 管理の境界は service に置く。
 - 共有画面と参加者カメラの責務混同
 - working な service を別アーキテクチャへ置換
 - room 固定化や Supabase 追加を責務分割と同時に混ぜること
+- `useRoomSession.js` に local tile / local preview / blur processor の DOM glue を持ち込むこと
 
 ---
 
@@ -287,6 +258,7 @@ room 管理や presence 管理の境界は service に置く。
 - device panel だけ分ける
 - remote publications だけ分ける
 - room session だけ分ける
+- local tile glue だけ分ける
 
 悪い例:
 - device, remote, room session, UI layout, Supabase を同時に触る
@@ -333,28 +305,12 @@ Plan には次を含める。
 3. Minimal patch strategy
 4. Risks
 5. Verification
+6. List of important variables/handlers/callbacks that received individual comments
 
 Plan の時点で、次を明示する。
 - 今回は何を分けるか
 - 今回は何を分けないか
 - どの不変条件を守るか
-
----
-
-## 望ましい最初のタスク
-最初の 1 手はこれを推奨する。
-
-### Task 1
-`useStreamReceiver.js` から device panel / device selection の責務だけを新規 composable に切り出す。
-
-理由:
-- late join に触れない
-- SkyWay の接続順序を壊しにくい
-- 行数を安全に減らせる
-- 将来の room 管理追加と競合しにくい
-
-次点:
-- remote publications / remote tiles の責務分離
 
 ---
 
@@ -367,6 +323,7 @@ Plan の時点で、次を明示する。
 - 文字化けがない
 - merge marker がない
 - コメントや日本語テキストを壊していない
+- 新規 composable に「何を担当し、何を担当しないか」が明記されている
 
 悪い差分の兆候:
 - 差分が大きすぎる
@@ -374,6 +331,7 @@ Plan の時点で、次を明示する。
 - `useStreamReceiver.js` 以外まで広く巻き込んでいる
 - UI 修正や Supabase 追加まで同時に始めている
 - late join や screen share の順序を暗黙に変えている
+- room session 分割で local tile / remote attach / blur glue まで一緒に持ち込んでいる
 
 ---
 
@@ -389,7 +347,7 @@ Plan の時点で、次を明示する。
 ---
 
 ## 例: 良い依頼文
-`useStreamReceiver.js` から device panel / device selection の責務だけを `src/composables/useMediaDevicePanels.js` へ切り出してください。挙動変更は禁止です。late join, join/leave, screen share, background blur, RNNoise の接続順序は触らないでください。whole-file rewrite は禁止です。変更後は Plan, Files to change, Minimal patch strategy, Risks, Verification の順でまとめてください。
+`useStreamReceiver.js` から room lifecycle の責務だけを `src/composables/useRoomSession.js` へ切り出してください。挙動変更は禁止です。`subscribeExisting()` と `onStreamPublished` の責務を混ぜず、join / publish / subscribe / leave の順序を維持してください。whole-file rewrite は禁止です。変更後は Plan, Files to change, Minimal patch strategy, Risks, Verification の順でまとめてください。
 
 ---
 

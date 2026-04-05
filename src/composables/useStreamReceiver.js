@@ -10,37 +10,17 @@
 // ・背景ぼかし / RNNoise の ON・OFF 制御
 // ・UI 状態（ミュート、拡大、設定パネルなど）の集中管理
 
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
-import {
-  createContext,
-  findOrCreateRoom,
-  joinRoom as skywayJoin,
-  publishLocal,
-  subscribeExisting,
-  bindOnStreamPublished,
-  unbindOnStreamPublished,
-  bindOnStreamUnpublished,
-  unbindOnStreamUnpublished,
-  leave as skywayLeave,
-} from '../services/SkywayRoomService.js';
-import {
-  createCameraStream,
-  createMicrophoneStream,
-  enableBackgroundBlur,
-} from '../services/MediaStreamService.js';
-import { setupRnnoise } from '../services/RnnoiseService.js';
+import { ref, onMounted, onUnmounted } from 'vue';
 import {
   setRemoteAudioOutput,
-  ensureLocalTileElement,
   enlargeVideo as uiEnlarge,
   shrinkVideo as uiShrink
 } from '../services/VideoUIService.js';
-import {
-  isScreenPublication,
-} from './helpers/useVideoTiles.js';
 import { useLocalMediaSession } from './useLocalMediaSession.js';
+import { useLocalVideoTileSession } from './useLocalVideoTileSession.js';
 import { useMediaDevicePanels } from './useMediaDevicePanels.js';
 import { useRemotePublications } from './useRemotePublications.js';
+import { useRoomSession } from './useRoomSession.js';
 
 /**
  * WebRTC 画面の state と service 呼び出し順序を管理する orchestrator composable。
@@ -81,30 +61,6 @@ export function useStreamReceiver() {
   const localVideoStream = ref(null);        // ローカル映像ストリーム参照
   const localSelfCameraPreviewStream = ref(null); // プレビュー専用のローカルカメラ stream。切替時の解放に使う
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
-  let streamPublishedHandler = null;         // onStreamPublished の解除に使うハンドラ参照
-  let streamUnpublishedHandler = null;       // onStreamUnpublished の購読解除に使うハンドラ参照
-  let publicationEnabledHandler = null;      // onPublicationEnabled の購読解除に使うハンドラ参照
-  let publicationDisabledHandler = null;     // onPublicationDisabled の購読解除に使うハンドラ参照
-  let blurProcessor = null;                  // 背景ぼかしの Processor 参照
-  let rnnoiseHandle = null;                  // RNNoise 初期化ハンドル
-  let localTileContainerEl = null;           // ローカルタイルを再利用するためのコンテナ要素参照
-  let localTileVideoEl = null;               // ローカルタイル内で stream attach 先になる video 要素参照
-
-  const releaseLocalVideoStream = () => {
-    try {
-      localVideoStream.value?.release?.();
-    } catch {}
-    localVideoStream.value = null;
-  };
-
-  const reflectInitialMuteState = async () => {
-    try {
-      if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
-    } catch {}
-    try {
-      if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
-    } catch {}
-  };
 
   const handleLocalTileEnlarge = (videoEl) => {
     try {
@@ -113,73 +69,9 @@ export function useStreamReceiver() {
     } catch {}
   };
 
-  const ensureLocalTileRefs = () => {
-    const { containerEl, videoEl } = ensureLocalTileElement({
-      currentContainerEl: localTileContainerEl,
-      currentVideoEl: localTileVideoEl,
-      onEnlarge: handleLocalTileEnlarge,
-    });
-    localTileContainerEl = containerEl;
-    localTileVideoEl = videoEl;
-    return { containerEl, videoEl };
-  };
-
-  const syncLocalVideoTile = () => {
-    screenShareTiles.value = screenShareTiles.value.filter((tile) => !tile.isLocal);
-    cameraFilmstripTiles.value = cameraFilmstripTiles.value.filter((tile) => !tile.isLocal);
-
-    const publication = localVideoPublication.value;
-    if (!publication?.id || !localMember.value?.id) {
-      syncSelectedMainShareState();
-      return;
-    }
-
-    ensureLocalTileRefs();
-    if (!localTileContainerEl) {
-      syncSelectedMainShareState();
-      return;
-    }
-
-    localTileContainerEl.dataset.memberId = localMember.value.id;
-    localTileContainerEl.dataset.pubId = publication.id;
-
-    const tile = {
-      pubId: publication.id,
-      memberId: localMember.value.id,
-      label: 'あなた',
-      el: localTileContainerEl,
-      isLocal: true
-    };
-
-    if (isScreenPublication(publication)) {
-      screenShareTiles.value.push(tile);
-    } else {
-      cameraFilmstripTiles.value.push(tile);
-    }
-
-    syncSelectedMainShareState();
-  };
-
-  const updateLocalVideoPublicationMetadata = async (kind) => {
-    try {
-      await localVideoPublication.value?.updateMetadata?.(JSON.stringify({ kind }));
-    } catch {}
-  };
-
-  const getLocalTileElements = () => ({
-    containerEl: localTileContainerEl,
-    videoEl: localTileVideoEl,
-  });
-
-  const setLocalTileElements = ({ containerEl, videoEl }) => {
-    localTileContainerEl = containerEl;
-    localTileVideoEl = videoEl;
-  };
-
-  const getBlurProcessor = () => blurProcessor;
-
-  const setBlurProcessor = (nextBlurProcessor) => {
-    blurProcessor = nextBlurProcessor;
+  // 各 sub composable からの失敗を UI 表示用 state に集約する callback。
+  const setErrorMessage = (message) => {
+    errorMessage.value = message;
   };
 
   // useMediaDevicePanels の speaker 確定時に呼ばれる bridge callback。既存 remote audio へ出力先を再適用する処理は streamArea を保持する orchestrator 側で実行する必要がある。
@@ -288,6 +180,39 @@ export function useStreamReceiver() {
     getCurrentRoom: () => context.room,
   });
 
+  // local tile / blur / metadata glue を担当する sub composable。orchestrator 側は room lifecycle と UI 公開 API shape の維持に専念する。
+  const {
+    // local tile と local stream 解放を publish 状態へ同期する handler。
+    syncLocalVideoTile,
+    // local video publication の metadata を更新する handler。
+    updateLocalVideoPublicationMetadata,
+    // leave や差し替え時にローカル映像 stream を解放する handler。
+    releaseLocalVideoStream,
+    // background blur の processor 参照を取得する accessor。
+    getBlurProcessor,
+    // background blur の processor 参照を更新する accessor。
+    setBlurProcessor,
+    // local tile の DOM 参照を取得する accessor。
+    getLocalTileElements,
+    // local tile の DOM 参照を更新する accessor。
+    setLocalTileElements,
+  } = useLocalVideoTileSession({
+    // local tile の memberId/pubId を同期するための local member 参照。
+    localMember,
+    // metadata 更新と local tile 種別判定に使う local video publication 参照。
+    localVideoPublication,
+    // leave・差し替え時の release 対象になる local video stream 参照。
+    localVideoStream,
+    // 共有画面帯の local tile を更新する配列参照。
+    screenShareTiles,
+    // 参加者カメラ帯の local tile を更新する配列参照。
+    cameraFilmstripTiles,
+    // local tile 更新後に主表示共有 pubId を整合させる callback。
+    syncSelectedMainShareState,
+    // local tile の拡大操作を UI 状態に橋渡しする callback。
+    onLocalTileEnlarge: handleLocalTileEnlarge,
+  });
+
   // ローカルメディア操作（画面共有/背景ぼかし/ローカルプレビュー）の委譲先。
   const localMediaSessionHandlers = useLocalMediaSession({
     joined,
@@ -301,9 +226,7 @@ export function useStreamReceiver() {
     isScreenSharing,
     isBackgroundBlurred,
     isVideoMuted,
-    setErrorMessage: (message) => {
-      errorMessage.value = message;
-    },
+    setErrorMessage,
     removeTileByPubId,
     syncLocalVideoTile,
     updateLocalVideoPublicationMetadata,
@@ -323,224 +246,84 @@ export function useStreamReceiver() {
   // panel 側へ渡した bridge handler 参照へ実体を接続し、camera 再選択時に local self preview 更新を呼べるようにする。
   startLocalSelfCameraPreviewHandler = startLocalSelfCameraPreview;
 
-  // ルームを作成し、URL 共有の起点を確定する
-  /**
-   * URL または入力値の roomId を使って room を準備する。
-   *
-   * @returns {Promise<void>}
-   * @throws {Error} SkyWay Context / Room 作成時の例外をそのまま伝播。
-   * @sideeffects context.ctx / context.room / roomCreated / roomId を更新する。
-   */
-  const createRoom = async () => {
-    if (!roomId.value) {
-      roomId.value = window.crypto?.randomUUID?.() || 'demo-room';
-    }
-
-    if (!context.ctx) {
-      context.ctx = await createContext();
-    }
-
-    context.room = await findOrCreateRoom(context.ctx, roomId.value);
-    roomCreated.value = true;
-  };
-
-  // ルームに参加し、ローカル publish とリモート subscribe をまとめて行う
-  /**
-   * room 参加とローカル publish、および既存/新規 publication の購読を開始する。
-   *
-   * @returns {Promise<void>}
-   * @throws {never}
-   * @sideeffects 接続 state、ローカル publication、タイル state、イベントハンドラを更新する。
-   */
-  const joinRoom = async () => {
-    if (joining.value || joined.value) return;
-    joining.value = true;
-
-    try {
-      if (!roomCreated.value || !context.room) await createRoom();
-      resetRemotePublicationsForJoin();
-
-      const member = await skywayJoin(context.room);
-      localMember.value = member;
-
-      if (streamPublishedHandler) {
-        unbindOnStreamPublished(context.room, streamPublishedHandler);
-        streamPublishedHandler = null;
-      }
-      if (streamUnpublishedHandler) {
-        unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
-        streamUnpublishedHandler = null;
-      }
-      if (publicationEnabledHandler) {
-        try {
-          context.room?.onPublicationEnabled?.remove(publicationEnabledHandler);
-        } catch {}
-        publicationEnabledHandler = null;
-      }
-      if (publicationDisabledHandler) {
-        try {
-          context.room?.onPublicationDisabled?.remove(publicationDisabledHandler);
-        } catch {}
-        publicationDisabledHandler = null;
-      }
-
-      streamPublishedHandler = bindOnStreamPublished(
-        context.room,
-        member,
-        async (stream, pub) => {
-          try {
-            if (pub?.publisher?.id && member?.id && pub.publisher.id === member.id) return;
-            await attachRemote(stream, pub);
-          } catch (err) {
-            console.warn('配信の受信処理に失敗:', err);
-          }
-        }
-      );
-      streamUnpublishedHandler = bindOnStreamUnpublished(context.room, async (event) => {
-        const publication = event?.publication;
-        if (!publication?.id) return;
-        if (isRemoteAudioPublication(publication)) {
-          hideRemoteAudioMuteBadge(publication);
-        }
-        removePublicationTracking(publication.id);
-        removeTileByPubId(publication.id);
-      });
-      publicationEnabledHandler = (event) => {
-        syncRemoteAudioMuteBadge(event?.publication);
-      };
-      publicationDisabledHandler = (event) => {
-        syncRemoteAudioMuteBadge(event?.publication);
-      };
-      context.room?.onPublicationEnabled?.add(publicationEnabledHandler);
-      context.room?.onPublicationDisabled?.add(publicationDisabledHandler);
-
-      const videoStream = await createCameraStream(
-        selectedVideoInputId.value
-          ? { video: { deviceId: selectedVideoInputId.value } }
-          : undefined
-      );
-      localVideoStream.value = videoStream;
-
-      let audioConstraints = { audio: { deviceId: selectedAudioInputId.value || undefined } };
-      if (isRnnoiseEnabled.value) {
-        rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value);
-        audioConstraints = rnnoiseHandle.constraints;
-      }
-
-      const audioStream = await createMicrophoneStream(audioConstraints);
-      const pubs = await publishLocal(member, {
-        videoStream,
-        audioStream
-      });
-
-      localVideoPublication.value = pubs.videoPub;
-      localAudioPublication.value = pubs.audioPub;
-      await updateLocalVideoPublicationMetadata('camera');
-
-      joined.value = true;
-      await nextTick();
-
-      attachLocalPreview(localVideoStream.value);
-      await reflectInitialMuteState();
-      syncLocalVideoTile();
-
-      if (isBackgroundBlurred.value && !isScreenSharing.value) {
-        const ret = await enableBackgroundBlur({
-          localMember,
-          localVideoPublication,
-          localVideoStream,
-          localVideoEl
-        });
-        blurProcessor = ret?.processor ?? null;
-        await updateLocalVideoPublicationMetadata('camera');
-        attachLocalPreview(localVideoStream.value);
-        syncLocalVideoTile();
-
-        try {
-          if (isVideoMuted.value) await localVideoPublication.value?.disable?.();
-        } catch {}
-      }
-
-      await subscribeExisting(context.room, member, async (stream, pub) => {
-        await attachRemote(stream, pub);
-      });
-
-    } catch (e) {
-      errorMessage.value = e?.message || String(e);
-    } finally {
-      joining.value = false;
-    }
-  };
-
-  // ルーム退出およびすべてのリソース解放
-  /**
-   * room 退出とローカル/リモート資源の解放を行う。
-   *
-   * @returns {Promise<void>}
-   * @throws {never}
-   * @sideeffects SkyWay 退出、DOM 要素削除、stream 解放、各種 state 初期化を行う。
-   */
-  const leaveRoom = async () => {
-    if (!joined.value || leaving.value) return;
-    leaving.value = true;
-
-    try {
-      if (streamPublishedHandler) unbindOnStreamPublished(context.room, streamPublishedHandler);
-      streamPublishedHandler = null;
-      if (streamUnpublishedHandler) {
-        unbindOnStreamUnpublished(context.room, streamUnpublishedHandler);
-      }
-      streamUnpublishedHandler = null;
-      if (publicationEnabledHandler) {
-        try {
-          context.room?.onPublicationEnabled?.remove(publicationEnabledHandler);
-        } catch {}
-      }
-      publicationEnabledHandler = null;
-      if (publicationDisabledHandler) {
-        try {
-          context.room?.onPublicationDisabled?.remove(publicationDisabledHandler);
-        } catch {}
-      }
-      publicationDisabledHandler = null;
-
-      stopLocalSelfCameraPreview();
-      await skywayLeave(localMember.value);
-
-      cleanupRemotePublicationsForLeave();
-
-      try { localVideoEl.value?.pause?.(); } catch {}
-      try {
-        if (localVideoEl.value) localVideoEl.value.srcObject = null;
-      } catch {}
-
-      releaseLocalVideoStream();
-
-      try {
-        await blurProcessor?.dispose?.();
-      } catch {}
-      blurProcessor = null;
-
-      try {
-        rnnoiseHandle?.cleanup?.();
-      } catch {}
-      rnnoiseHandle = null;
-
-      joined.value = false;
-      isScreenSharing.value = false;
-      localMember.value = null;
-      localVideoPublication.value = null;
-      localAudioPublication.value = null;
-      roomCreated.value = false;
-      context.room = null;
-      context.ctx = null;
-
-    } catch (e) {
-      errorMessage.value = e?.message || String(e);
-    } finally {
-      leaving.value = false;
-    }
-  };
+  // room lifecycle と room event bind/unbind を担当する sub composable。orchestrator 側は local/remote glue の責務を維持しつつ callback 注入で利用する。
+  const {
+    // room 作成と URL 共有の起点確定を行う handler。
+    createRoom,
+    // room 参加、publish、subscribeExisting、event bind を順序どおりに実行する handler。
+    joinRoom,
+    // room 退出、event unbind、join 関連 state cleanup を行う handler。
+    leaveRoom,
+  } = useRoomSession({
+    // room 識別子。createRoom 時の room 生成キーに使う。
+    roomId,
+    // room 作成済み state。join 前の createRoom 要否判定に使う。
+    roomCreated,
+    // join 多重実行防止 state。joinRoom の排他に使う。
+    joining,
+    // join 完了 state。join/leave ガードと UI 表示切替に使う。
+    joined,
+    // leave 多重実行防止 state。leaveRoom の排他に使う。
+    leaving,
+    // self publication 判定と publish/unpublish 呼び出しに使う local member。
+    localMember,
+    // ローカル映像 publication。mute 反映と metadata 更新に使う。
+    localVideoPublication,
+    // ローカル音声 publication。mute 反映と leave cleanup に使う。
+    localAudioPublication,
+    // ローカル映像 stream。publish と preview attach の参照元。
+    localVideoStream,
+    // ローカル preview 要素。leave 時の preview cleanup に使う。
+    localVideoEl,
+    // ローカル音声 mute state。join 後の初期 mute 反映に使う。
+    isAudioMuted,
+    // ローカル映像 mute state。join 後の初期 mute と blur 後再反映に使う。
+    isVideoMuted,
+    // 画面共有 state。join 後の blur 適用可否判定に使う。
+    isScreenSharing,
+    // 背景ぼかし state。join 後の blur 再適用可否判定に使う。
+    isBackgroundBlurred,
+    // RNNoise を join 時に有効化するかの判定 state。
+    isRnnoiseEnabled,
+    // camera stream 生成時に使う選択済み deviceId。
+    selectedVideoInputId,
+    // mic stream 生成時に使う選択済み deviceId。
+    selectedAudioInputId,
+    // SkyWay Context/Room 参照。room create/join/leave 全体で共有する。
+    context,
+    // sub composable 失敗時の UI エラー反映 callback。
+    setErrorMessage,
+    // join/leave 周辺で blur processor を読み出す accessor。
+    getBlurProcessor,
+    // join/leave 周辺で blur processor を更新する accessor。
+    setBlurProcessor,
+    // join 直前に remote publication/tile tracking を初期化する callback。
+    resetRemotePublicationsForJoin,
+    // subscribe 済み remote stream を attach/tile 同期する callback。
+    attachRemote,
+    // unpublish 後に publication 重複防止 tracking を解除する callback。
+    removePublicationTracking,
+    // unpublish 後に pubId 対応 tile を除去する callback。
+    removeTileByPubId,
+    // publication が remote audio かを判定する callback。
+    isRemoteAudioPublication,
+    // remote audio unpublish 時に mute badge を非表示へ戻す callback。
+    hideRemoteAudioMuteBadge,
+    // publication enabled/disabled 時に remote audio mute badge を再同期する callback。
+    syncRemoteAudioMuteBadge,
+    // join 後に local preview へ stream を attach する callback。
+    attachLocalPreview,
+    // local video publication metadata を更新する callback。
+    updateLocalVideoPublicationMetadata,
+    // local tile を publish 状態に合わせて再同期する callback。
+    syncLocalVideoTile,
+    // leave 時に画面共有中 self preview を停止する callback。
+    stopLocalSelfCameraPreview,
+    // leave 時に remote publication/tile/DOM を初期化する callback。
+    cleanupRemotePublicationsForLeave,
+    // leave 時にローカル映像 stream を解放する callback。
+    releaseLocalVideoStream,
+  });
 
   // マイクのミュート切替
   /**
