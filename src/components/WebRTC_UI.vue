@@ -140,6 +140,17 @@ const applyTileVideoMode = (tile, mode) => {
 
 const mountTileElement = (host, tile, mode = 'camera') => {
   if (!host || !tile?.el) return;
+  host.dataset.speakingHost = '1';
+  if (tile.el.dataset?.memberId) {
+    host.dataset.memberId = tile.el.dataset.memberId;
+  } else {
+    delete host.dataset.memberId;
+  }
+  if (tile.el.dataset?.pubId) {
+    host.dataset.pubId = tile.el.dataset.pubId;
+  } else {
+    delete host.dataset.pubId;
+  }
   applyTileVideoMode(tile, mode);
   if (tile.el.parentNode !== host) {
     host.replaceChildren(tile.el);

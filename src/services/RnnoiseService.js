@@ -7,7 +7,23 @@
 
 import { Rnnoise } from '@shiguredo/rnnoise-wasm';
 
-export async function setupRnnoise(audioDeviceId) {
+/**
+ * RNNoise を初期化し、VAD 通知と getUserMedia 用 constraints を返す。
+ *
+ * @param {string} audioDeviceId マイク deviceId。空の場合はブラウザ既定入力を使う。
+ * @param {{ onVad?: (vadLevel: number) => void }} [options] VAD 値通知 callback。
+ * @returns {Promise<{
+ *   constraints: { audio: MediaTrackConstraints },
+ *   denoisedTrack: MediaStreamTrack | null,
+ *   cleanup: () => void,
+ *   rnnoiseNode?: AudioWorkletNode,
+ * }>}
+ * @throws {never}
+ * @sideeffects AudioContext / AudioWorkletNode の生成、マイクストリーム取得、VAD 通知の購読を行う。
+ */
+export async function setupRnnoise(audioDeviceId, options = {}) {
+	// VAD 値受信時の通知先。未指定時は no-op で呼び出し側の分岐を減らす。
+	const { onVad = () => {} } = options;
 
 	// ============================
 	// ① フォールバック用の標準オーディオ設定
@@ -49,8 +65,14 @@ export async function setupRnnoise(audioDeviceId) {
 		
 		// ⑥ Worklet からのメッセージ受信（VADなど）
 		rnnoiseNode.port.onmessage = (ev) => {
-			// 呼び出し側で ev.data をそのまま扱えるようにする
-			// （このファイルでは処理しない）
+			try {
+				if (ev?.data?.type === 'vad') {
+					const value = Number(ev?.data?.value);
+					if (Number.isFinite(value)) {
+						onVad(value);
+					}
+				}
+			} catch {}
 		};
 
 	

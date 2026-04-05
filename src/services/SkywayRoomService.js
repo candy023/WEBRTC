@@ -43,8 +43,21 @@ export async function joinRoom(room) {
   });
 }
 
+/**
+ * local member の video/audio stream を publish し、種別ごとの publication を返す。
+ *
+ * @param {any} member publish を実行する local member。
+ * @param {object} streams
+ * @param {any} streams.videoStream 映像 stream。未指定なら video publication は作らない。
+ * @param {any} streams.audioStream 音声 stream。未指定なら audio publication は作らない。
+ * @returns {Promise<{ videoPub: any | null, audioPub: any | null }>}
+ * @throws {never}
+ * @sideeffects SkyWay member.publish を呼び出す。
+ */
 export async function publishLocal(member, { videoStream, audioStream }) {
+  // local video publication。未指定時は null を返し、呼び出し側で未 publish として扱う。
   const videoPub = videoStream ? await member.publish(videoStream) : null;
+  // local audio publication。未指定時は null を返し、呼び出し側で未 publish として扱う。
   const audioPub = audioStream ? await member.publish(audioStream) : null;
   return { videoPub, audioPub };
 }

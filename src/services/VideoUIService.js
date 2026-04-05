@@ -4,6 +4,15 @@
 // ・話者ハイライトの付与 / 解除
 // ・映像の拡大表示 / 元サイズへの復帰
 
+/**
+ * 単一 audio 要素の出力先を、対応ブラウザだけで安全に切り替える。
+ *
+ * @param {HTMLAudioElement | null | undefined} audioEl 出力先を変更する audio 要素。
+ * @param {string} deviceId 適用するスピーカー deviceId。
+ * @returns {Promise<void>}
+ * @throws {never}
+ * @sideeffects `setSinkId` が利用可能な場合に audio 要素の出力先を更新する。
+ */
 async function applyAudioOutputDevice(audioEl, deviceId) {
 	if (!audioEl) return;
 	if (!deviceId) return;
@@ -16,9 +25,19 @@ async function applyAudioOutputDevice(audioEl, deviceId) {
 	}
 }
 
+/**
+ * streamArea 配下の全 remote audio 要素へ、選択中スピーカー出力先を再適用する。
+ *
+ * @param {HTMLElement | null | undefined} streamAreaEl remote audio 要素を含むコンテナ。
+ * @param {string} deviceId 適用するスピーカー deviceId。
+ * @returns {Promise<void>}
+ * @throws {never}
+ * @sideeffects コンテナ内 audio 要素へ `setSinkId` を並列適用する。
+ */
 export async function setRemoteAudioOutput(streamAreaEl, deviceId) {
 	if (!streamAreaEl) return;
 
+	// 現在存在する remote audio 要素を列挙し、遅延追加前の既存要素へ即時反映する。
 	const audioEls = Array.from(streamAreaEl.querySelectorAll('audio'));
 	await Promise.allSettled(audioEls.map((el) => applyAudioOutputDevice(el, deviceId)));
 }
@@ -197,6 +216,14 @@ export function highlightSpeaking(containerEl, speaking) {
 		containerEl.classList.add('speaking');
 		containerEl.style.outline = '3px solid #22c55e';
 		containerEl.style.boxShadow = '0 0 8px #22c55e';
+		if (import.meta?.env?.DEV) {
+			console.debug('[highlightSpeaking:true]', {
+				memberId: containerEl?.dataset?.memberId || '',
+				tagName: containerEl?.tagName || '',
+				className: containerEl?.className || '',
+				style: containerEl?.getAttribute?.('style') || '',
+			});
+		}
 	} else {
 		containerEl.classList.remove('speaking');
 		containerEl.style.outline = '';

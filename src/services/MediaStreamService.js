@@ -32,6 +32,18 @@ export async function createDisplayStream() {
   return video;
 }
 
+/**
+ * 背景ぼかし用の processor を初期化し、local video publication を処理済み stream へ差し替える。
+ *
+ * @param {object} state
+ * @param {import('vue').Ref<any>} state.localMember publish/unpublish を実行する local member。
+ * @param {import('vue').Ref<any>} state.localVideoPublication 差し替え対象の local video publication。
+ * @param {import('vue').Ref<any>} state.localVideoStream 差し替え対象の local video stream。
+ * @param {import('vue').Ref<HTMLVideoElement | null>} state.localVideoEl ローカル preview の再attach先。
+ * @returns {Promise<{ processor: any | null }>}
+ * @throws {never}
+ * @sideeffects unpublish/publish、stream release、preview attach を実行する。
+ */
 export async function enableBackgroundBlur(state) {
   const {
     localMember,
@@ -50,6 +62,7 @@ export async function enableBackgroundBlur(state) {
     localVideoStream.value.release?.();
   }
 
+  // 差し替え後も呼び出し側で dispose できるよう processor を返却する。
   const processor = new BlurBackground();
   await processor.initialize();
 
@@ -69,6 +82,20 @@ export async function enableBackgroundBlur(state) {
   return { processor };
 }
 
+/**
+ * 背景ぼかしを解除し、カメラ stream を再生成して local video publication を元の経路へ戻す。
+ *
+ * @param {object} state
+ * @param {import('vue').Ref<any>} state.localMember publish/unpublish を実行する local member。
+ * @param {import('vue').Ref<any>} state.localVideoPublication 差し替え対象の local video publication。
+ * @param {import('vue').Ref<any>} state.localVideoStream 差し替え対象の local video stream。
+ * @param {import('vue').Ref<HTMLVideoElement | null>} state.localVideoEl ローカル preview の再attach先。
+ * @param {import('vue').Ref<string>} state.selectedVideoInputId カメラ再生成時に使う deviceId。
+ * @param {any} processor 現在有効な背景ぼかし processor。dispose 対象。
+ * @returns {Promise<void>}
+ * @throws {never}
+ * @sideeffects unpublish/publish、stream release、processor dispose、preview attach を実行する。
+ */
 export async function disableBackgroundBlur(state, processor) {
   const {
     localMember,

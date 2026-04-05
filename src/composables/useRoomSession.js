@@ -59,6 +59,7 @@ import { setupRnnoise } from '../services/RnnoiseService.js';
  * @param {() => void} params.stopLocalSelfCameraPreview self camera preview 停止 callback。
  * @param {() => void} params.cleanupRemotePublicationsForLeave leave 時の remote cleanup callback。
  * @param {() => void} params.releaseLocalVideoStream ローカル video stream 解放 callback。
+ * @param {(memberId: string, vadLevel: number) => void} [params.onLocalVadValue] ローカル VAD 値受信 callback。
  * @param {(memberId: string, audioStream: any) => void} [params.onJoinCompleted] join 完了後 callback。
  * @param {() => void} [params.onLeaveFinally] leave finally callback。
  * @returns {{
@@ -105,6 +106,7 @@ export function useRoomSession({
   stopLocalSelfCameraPreview,
   cleanupRemotePublicationsForLeave,
   releaseLocalVideoStream,
+  onLocalVadValue = () => {},
   onJoinCompleted = () => {},
   onLeaveFinally = () => {},
 }) {
@@ -232,7 +234,11 @@ export function useRoomSession({
 
       let audioConstraints = { audio: { deviceId: selectedAudioInputId.value || undefined } };
       if (isRnnoiseEnabled.value) {
-        rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value);
+        rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
+          onVad: (vadLevel) => {
+            onLocalVadValue(localMember.value?.id || member?.id || '', vadLevel);
+          },
+        });
         audioConstraints = rnnoiseHandle.constraints;
       }
 
@@ -273,7 +279,7 @@ export function useRoomSession({
       await subscribeExisting(context.room, member, async (stream, publication) => {
         await attachRemote(stream, publication);
       });
-      onJoinCompleted(localMember.value?.id || '', localAudioPublication.value?.stream);
+      onJoinCompleted(localMember.value?.id || '', audioStream);
 
     } catch (error) {
       setErrorMessage(error?.message || String(error));
