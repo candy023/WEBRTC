@@ -51,6 +51,7 @@ export function useRemotePublications({
   onRemoteAudioAttached = () => {},
   onRemoteAudioPublicationRemoved = () => {},
 }) {
+  // attach 開始前に streamArea mount を待機し、初回 join 直後の DOM 未準備を吸収する。
   const waitForStreamAreaReady = async () => {
     if (streamArea.value) return streamArea.value;
 

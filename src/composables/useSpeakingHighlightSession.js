@@ -10,7 +10,7 @@ import { highlightSpeaking } from '../services/VideoUIService.js';
  * @param {import('vue').Ref<HTMLElement | null>} params.streamArea remote attach 先コンテナ。
  * @returns {{
  *   startSpeakingMonitor: (memberId: string, audioStream: any) => void,
-  *   stopSpeakingMonitor: (memberId: string) => void,
+ *   stopSpeakingMonitor: (memberId: string) => void,
  *   updateVadLevel: (memberId: string, vadLevel: number) => void,
  *   cleanupSpeakingMonitors: () => void,
  * }}
@@ -20,22 +20,34 @@ import { highlightSpeaking } from '../services/VideoUIService.js';
 export function useSpeakingHighlightSession({
   streamArea,
 }) {
+  // DEV 環境だけ話者判定ログを出し、本番ログノイズを抑える。
   const isDev = !!import.meta?.env?.DEV;
+  // 話者判定のポーリング間隔（ms）。負荷と追従性のバランスで 150ms を採用する。
   const SPEAKING_POLL_INTERVAL_MS = 150;
+  // RMS ベース判定で非発話から発話へ遷移するしきい値。
   const SPEAKING_THRESHOLD_ON = 0.02;
+  // RMS ベース判定で発話から非発話へ戻すしきい値（ヒステリシス用）。
   const SPEAKING_THRESHOLD_OFF = 0.01;
+  // VAD/getAudioLevel ベース判定で非発話から発話へ遷移するしきい値。
   const SPEAKING_LEVEL_THRESHOLD_ON = 0.06;
+  // VAD/getAudioLevel ベース判定で発話から非発話へ戻すしきい値（ヒステリシス用）。
   const SPEAKING_LEVEL_THRESHOLD_OFF = 0.03;
+  // この時間（ms）以内に更新された VAD 値だけを優先し、古い値は破棄する。
   const SPEAKING_VAD_STALE_MS = 1000;
+  // 瞬間的な振れを吸収するために保持する RMS 履歴サンプル数。
   const SPEAKING_RMS_HISTORY_LENGTH = 5;
+  // memberId ごとの監視状態（interval/analyser/VAD 最新値）を保持する。
   const speakingMonitors = new Map();
+  // 全 monitor が共有する AudioContext。必要時のみ初期化して再利用する。
   let audioContext = null;
 
+  // DEV 専用の話者監視ログ出力。
   const debugSpeaking = (label, payload = {}) => {
     if (!isDev) return;
     console.log(`[speaking] ${label}`, payload);
   };
 
+  // 話者監視に使う AudioContext を遅延生成し、停止復帰時は resume を試行する。
   const ensureAudioContext = () => {
     if (!audioContext) {
       try {
@@ -51,6 +63,7 @@ export function useSpeakingHighlightSession({
     return audioContext;
   };
 
+  // SkyWay stream / MediaStream どちらでも先頭の audio track を取り出す。
   const extractAudioTrack = (audioStream) => {
     if (!audioStream) return null;
 
@@ -67,6 +80,7 @@ export function useSpeakingHighlightSession({
     return null;
   };
 
+  // 取得した audio track から analyser を組み立て、RMS 計算に必要な state を返す。
   const createAnalyserForTrack = (audioTrack) => {
     if (!audioTrack) return null;
 
@@ -90,6 +104,7 @@ export function useSpeakingHighlightSession({
     }
   };
 
+  // analyser の時系列データから RMS（0-1 近辺）を計算する。
   const computeRms = (dataArray) => {
     if (!dataArray?.length) return 0;
 
@@ -101,6 +116,7 @@ export function useSpeakingHighlightSession({
     return Math.sqrt(sum / dataArray.length);
   };
 
+  // memberId に一致するタイル要素を優先順位つきで探索する。
   const findTileContainerByMemberId = (memberId) => {
     if (!memberId) return null;
 
@@ -121,6 +137,7 @@ export function useSpeakingHighlightSession({
     ) || null;
   };
 
+  // 話者状態に応じた視覚ハイライトを該当タイルへ適用する。
   const applySpeakingHighlight = (memberId, speaking) => {
     const containerEl = findTileContainerByMemberId(memberId);
     debugSpeaking('applyHighlight', {
@@ -134,6 +151,7 @@ export function useSpeakingHighlightSession({
     highlightSpeaking(containerEl, speaking);
   };
 
+  // 指定 member の監視を停止し、monitor state とハイライトを確実に解放する。
   const stopSpeakingMonitor = (memberId) => {
     if (!memberId) return;
 
@@ -148,6 +166,7 @@ export function useSpeakingHighlightSession({
     applySpeakingHighlight(memberId, false);
   };
 
+  // 外部（RNNoise VAD）から受けた最新レベルを monitor に反映する。
   const updateVadLevel = (memberId, vadLevel) => {
     if (!memberId) return;
 
@@ -159,6 +178,7 @@ export function useSpeakingHighlightSession({
     monitor.vadUpdatedAt = Date.now();
   };
 
+  // 指定 member の音声監視を開始し、RMS/VAD のハイブリッド判定で話者状態を更新する。
   const startSpeakingMonitor = (memberId, audioStream) => {
     debugSpeaking('startMonitor', {
       memberId,
@@ -189,6 +209,7 @@ export function useSpeakingHighlightSession({
       audioContextState: audioContext?.state || '',
     });
 
+    // memberId ごとの監視中状態。tick で更新し、stop/cleanup で破棄する。
     const monitor = {
       intervalId: null,
       speaking: false,
@@ -201,6 +222,7 @@ export function useSpeakingHighlightSession({
       vadUpdatedAt: 0,
     };
 
+    // 監視レベルの取得元を VAD -> getAudioLevel -> RMS の順でフォールバックする。
     const readAudioLevel = async () => {
       const now = Date.now();
       if (
@@ -233,6 +255,7 @@ export function useSpeakingHighlightSession({
       };
     };
 
+    // 1 回分の判定処理。ヒステリシスしきい値を使って speaking state を安定化する。
     const tick = async () => {
       if (monitor.checking) return;
       monitor.checking = true;
@@ -306,6 +329,7 @@ export function useSpeakingHighlightSession({
     void tick();
   };
 
+  // 全 member の監視を停止し、共有 AudioContext も閉じてセッション境界を初期化する。
   const cleanupSpeakingMonitors = () => {
     Array.from(speakingMonitors.keys()).forEach((memberId) => {
       stopSpeakingMonitor(memberId);

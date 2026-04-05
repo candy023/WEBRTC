@@ -66,6 +66,7 @@ export function useLocalMediaSession({
   setLocalTileElements,
   onLocalTileEnlarge,
 }) {
+  // local tile の DOM 参照を常に有効化し、preview attach 先を1か所で再利用できるようにする。
   const ensureLocalTileRefs = () => {
     const currentTileElements = getLocalTileElements();
     const ensuredTileElements = ensureLocalTileElement({
@@ -80,6 +81,7 @@ export function useLocalMediaSession({
     return ensuredTileElements;
   };
 
+  // 現在 publish 中の local video を解除し、関連タイルを pubId ベースで同期削除する。
   const unpublishCurrentVideo = async () => {
     const currentPubId = localVideoPublication.value?.id ?? null;
     try {
@@ -91,6 +93,7 @@ export function useLocalMediaSession({
     if (currentPubId) removeTileByPubId(currentPubId);
   };
 
+  // local preview と local tile へ同じ stream を attach し、表示の不一致を防ぐ。
   const attachLocalPreview = (stream) => {
     try {
       if (!stream || !localVideoEl.value) return;
@@ -105,6 +108,7 @@ export function useLocalMediaSession({
     } catch {}
   };
 
+  // 画面共有中の self camera preview を停止し、stream と video 要素の参照を解放する。
   const stopLocalSelfCameraPreview = () => {
     try {
       localSelfCameraPreviewStream.value?.release?.();
@@ -119,6 +123,7 @@ export function useLocalMediaSession({
     } catch {}
   };
 
+  // 画面共有中だけ self camera preview を生成し、PiP 相当の preview 要素へ再attachする。
   const startLocalSelfCameraPreview = async () => {
     if (!isScreenSharing.value) return;
 
@@ -141,11 +146,13 @@ export function useLocalMediaSession({
     } catch {}
   };
 
+  // camera/screen の publish 切替を順序どおりに実行し、local tile と metadata を同期する。
   const screenShare = async () => {
     if (!joined.value || !localMember.value) return;
 
     try {
       if (isScreenSharing.value) {
+        // screen 共有から camera に戻す経路。
         stopLocalSelfCameraPreview();
         await unpublishCurrentVideo();
         releaseLocalVideoStream();
@@ -165,6 +172,7 @@ export function useLocalMediaSession({
         syncLocalVideoTile();
 
         if (isBackgroundBlurred.value) {
+          // camera 復帰時に背景ぼかしが有効なら publish し直した stream へ再適用する。
           const backgroundBlurResult = await enableBackgroundBlur({
             localMember,
             localVideoPublication,
@@ -178,6 +186,7 @@ export function useLocalMediaSession({
         }
 
       } else {
+        // camera から screen 共有へ切り替える経路。
         await unpublishCurrentVideo();
         releaseLocalVideoStream();
 
@@ -206,6 +215,7 @@ export function useLocalMediaSession({
     }
   };
 
+  // 背景ぼかし状態を切り替え、publish 済み camera stream と metadata を同期更新する。
   const toggleBackgroundBlur = async () => {
     const nextBlurred = !isBackgroundBlurred.value;
 
