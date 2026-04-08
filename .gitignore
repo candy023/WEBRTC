@@ -36,3 +36,4 @@ useRoomControl.js
 src/components/services
 src/components/utils
 src/images
+.env.example
