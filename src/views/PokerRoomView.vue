@@ -1,6 +1,9 @@
 <script setup>
+import { resolvePolicyByRouteSegment } from '../composables/useRoomPolicy.js';
+
+const pokerRoomPolicy = resolvePolicyByRouteSegment('poker');
 // Poker room の固定 slug。shell 段階でも導線の対象 room を明確にする。
-const POKER_ROOM_SLUG = 'poker-room';
+const POKER_ROOM_SLUG = pokerRoomPolicy?.slug ?? 'poker-room';
 </script>
 
 <template>

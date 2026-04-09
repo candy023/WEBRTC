@@ -5,17 +5,24 @@ import WorkRoomView from '../views/WorkRoomView.vue';
 import PokerRoomView from '../views/PokerRoomView.vue';
 import { getAuthSession } from '../services/SupabaseService.js';
 import { useRoomJoinGuard } from '../composables/useRoomJoinGuard.js';
+import { resolvePolicyByRouteSegment } from '../composables/useRoomPolicy.js';
 
 // 認証導線の起点となるログイン画面パス。
 const LOGIN_PATH = '/login';
 // 認証後の部屋選択画面パス。保護ルート未認証時の戻し先判定にも使う。
 const ROOM_SELECT_PATH = '/rooms';
 
-// 部屋ルートへ進む前に BAN 判定へ渡す固定 room slug 定義。
-const ROOM_SLUG_BY_ROUTE_NAME = {
-  workRoom: 'work-room',
-  pokerRoom: 'poker-room',
+const requirePolicyByRouteSegment = (routeSegment) => {
+  const roomPolicy = resolvePolicyByRouteSegment(routeSegment);
+  if (!roomPolicy) {
+    throw new Error(`Room policy is not found for route segment: ${routeSegment}`);
+  }
+
+  return roomPolicy;
 };
+
+const workRoomPolicy = requirePolicyByRouteSegment('work');
+const pokerRoomPolicy = requirePolicyByRouteSegment('poker');
 
 // 画面導線全体の route 定義。auth guard が meta を参照してアクセス可否を一元判定する。
 const routes = [
@@ -40,21 +47,21 @@ const routes = [
     },
   },
   {
-    path: '/rooms/work',
+    path: workRoomPolicy.routePath,
     name: 'work-room',
     component: WorkRoomView,
     meta: {
       requiresAuth: true,
-      roomSlug: ROOM_SLUG_BY_ROUTE_NAME.workRoom,
+      roomSlug: workRoomPolicy.slug,
     },
   },
   {
-    path: '/rooms/poker',
+    path: pokerRoomPolicy.routePath,
     name: 'poker-room',
     component: PokerRoomView,
     meta: {
       requiresAuth: true,
-      roomSlug: ROOM_SLUG_BY_ROUTE_NAME.pokerRoom,
+      roomSlug: pokerRoomPolicy.slug,
     },
   },
   {

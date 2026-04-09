@@ -2,12 +2,7 @@
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 import { useLobbyRooms } from '../composables/useLobbyRooms.js';
-
-// DB の room slug からルーティング先を引く固定マップ。固定 2 ルーム導線を view 側で明示する。
-const ROOM_PATH_BY_SLUG = {
-  'work-room': '/rooms/work',
-  'poker-room': '/rooms/poker',
-};
+import { toRoomRouteLocation } from '../composables/useRoomPolicy.js';
 
 // 部屋一覧 UI で必要な state。fixed rooms の表示と再取得操作に利用する。
 const {
@@ -23,12 +18,17 @@ const route = useRoute();
 const selectableRooms = computed(() => {
   return lobbyRooms.value
     .map((room) => {
+      const roomRouteLocation = toRoomRouteLocation(room);
+      if (!roomRouteLocation) {
+        return null;
+      }
+
       return {
         ...room,
-        routePath: ROOM_PATH_BY_SLUG[room.slug] ?? null,
+        roomRouteLocation,
       };
     })
-    .filter((room) => !!room.routePath);
+    .filter((room) => !!room);
 });
 
 const bannedRoomSlug = computed(() => {
@@ -51,28 +51,6 @@ const bannedMessage = computed(() => {
   return '入室できません。管理者に確認してください。';
 });
 
-/**
- * Purpose: 選択した room の route location を組み立てる。
- * Parameters:
- * - {{
- *   routePath: string,
- *   skyway_room_name: string,
- * }} room 遷移対象の room 情報。
- * Returns:
- * - {{ path: string, query: { room: string } }} 遷移先 location。
- * Throws:
- * - {never}
- * Side effects:
- * - なし
- */
-const toRoomLocation = (room) => {
-  return {
-    path: room.routePath,
-    query: {
-      room: room.skyway_room_name,
-    },
-  };
-};
 </script>
 
 <template>
@@ -104,7 +82,7 @@ const toRoomLocation = (room) => {
           <RouterLink
             v-for="room in selectableRooms"
             :key="room.slug"
-            :to="toRoomLocation(room)"
+            :to="room.roomRouteLocation"
             class="block rounded-lg border border-gray-200 px-4 py-4 hover:border-blue-400 hover:bg-blue-50"
           >
             <p class="text-base font-medium text-gray-900">{{ room.display_name }}</p>
