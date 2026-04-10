@@ -1,26 +1,53 @@
 <script setup>
+import { computed, onMounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import WebRTC_UI from '../components/WebRTC_UI.vue';
+import PokerRoomShell from '../components/poker/PokerRoomShell.vue';
+import PokerTablePlaceholder from '../components/poker/PokerTablePlaceholder.vue';
 import { resolvePolicyByRouteSegment } from '../composables/useRoomPolicy.js';
 
 const pokerRoomPolicy = resolvePolicyByRouteSegment('poker');
 // Poker room の固定 slug。shell 段階でも導線の対象 room を明確にする。
 const POKER_ROOM_SLUG = pokerRoomPolicy?.slug ?? 'poker-room';
+// Poker room の SkyWay room 名。直接遷移時でも query の room 値を固定化する。
+const POKER_SKYWAY_ROOM_NAME = pokerRoomPolicy?.skywayRoomName ?? 'poker-room';
+
+const route = useRoute();
+const router = useRouter();
+const isPokerRoomQueryReady = computed(() => {
+  return route.query.room === POKER_SKYWAY_ROOM_NAME;
+});
+
+onMounted(async () => {
+  if (isPokerRoomQueryReady.value) {
+    return;
+  }
+
+  await router.replace({
+    path: route.path,
+    query: {
+      ...route.query,
+      room: POKER_SKYWAY_ROOM_NAME,
+    },
+  });
+});
 </script>
 
 <template>
-  <main class="min-h-screen bg-gray-50 px-4 py-10">
-    <div class="mx-auto w-full max-w-2xl space-y-6 rounded-xl border bg-white p-6 shadow-sm">
-      <RouterLink to="/rooms" class="text-sm text-blue-600 hover:underline">
-        ← 部屋一覧へ戻る
-      </RouterLink>
+  <PokerRoomShell :room-slug="POKER_ROOM_SLUG" title="Poker Room">
+    <template #table>
+      <PokerTablePlaceholder />
+    </template>
 
-      <header class="space-y-2">
-        <h1 class="text-2xl font-semibold text-gray-900">Poker Room</h1>
-        <p class="text-sm text-gray-600">
-          この画面は Poker 専用 view の初期 shell です。詳細 UI は次段階で実装します。
-        </p>
-      </header>
-
-      <p class="text-xs text-gray-500">slug: {{ POKER_ROOM_SLUG }}</p>
-    </div>
-  </main>
+    <template #call>
+      <section class="space-y-2 rounded border border-gray-200 bg-white p-3">
+        <h2 class="text-sm font-semibold text-gray-900">通話パネル（補助）</h2>
+        <p class="text-xs text-gray-600">通話機能は既存 WebRTC UI を再利用します。</p>
+      </section>
+      <div v-if="isPokerRoomQueryReady" class="rounded border border-gray-200">
+        <WebRTC_UI />
+      </div>
+      <p v-else class="text-xs text-gray-600">通話領域を初期化中…</p>
+    </template>
+  </PokerRoomShell>
 </template>
