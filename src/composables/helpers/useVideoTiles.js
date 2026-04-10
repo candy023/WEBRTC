@@ -59,11 +59,11 @@ export function syncSelectedMainShare(selectedMainSharePubId, screenShareTiles) 
   }
 
   if (!selectedMainSharePubId) {
-    return screenShareTiles[0].pubId;
+    return null;
   }
 
   const exists = screenShareTiles.some((tile) => tile.pubId === selectedMainSharePubId);
-  return exists ? selectedMainSharePubId : screenShareTiles[0].pubId;
+  return exists ? selectedMainSharePubId : null;
 }
 
 /**
