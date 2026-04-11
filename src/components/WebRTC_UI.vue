@@ -3,7 +3,29 @@
 // - 実際の WebRTC / SkyWay の接続やメディア処理は `useStreamReceiver` と各 services に委譲しています。
 // - ここでは「なぜその ref/関数が必要か」を示すコメントを残し、UI 側の意図を明確にします。
 import { computed } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
 import { useStreamReceiver } from '../composables/useStreamReceiver.js';
+
+// fixed room view から渡される UI/遷移ポリシー。既存利用を壊さないため既定値を持たせる。
+const props = defineProps({
+  allowCreateRoomUi: {
+    type: Boolean,
+    default: true,
+  },
+  requiresLeaveOnBack: {
+    type: Boolean,
+    default: false,
+  },
+  enterButtonLabelJa: {
+    type: String,
+    default: '参加',
+  },
+  showUrlShareUi: {
+    type: Boolean,
+    default: true,
+  },
+});
+
 const {
   // `streamArea`: remote 映像が差し込まれるコンテナ。VideoUIService が DOM を生成してここに挿入します。
   streamArea,
@@ -166,6 +188,16 @@ const mountTileElement = (host, tile, mode = 'camera') => {
     host.replaceChildren(tile.el);
   }
 };
+
+// room 参加中に別 route へ遷移する前に leave を完了し、同名再入室時の重複エラーを防ぐ。
+onBeforeRouteLeave(async () => {
+  if (!props.requiresLeaveOnBack || !joined.value) {
+    return true;
+  }
+
+  await leaveRoom();
+  return true;
+});
 </script>
 
 <template>
@@ -174,8 +206,8 @@ const mountTileElement = (host, tile, mode = 'camera') => {
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur px-3 py-2 shadow-sm">
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
-          <button v-if="!roomCreated" @click="createRoom" class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm hover:bg-blue-700">＋作成</button>
-          <button v-if="roomId && !joined" :disabled="joining || leaving" @click="joinRoom" class="px-3 py-1.5 rounded bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">{{ joining ? '参加中…' : '参加' }}</button>
+          <button v-if="props.allowCreateRoomUi && !roomCreated" @click="createRoom" class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm hover:bg-blue-700">＋作成</button>
+          <button v-if="roomId && !joined" :disabled="joining || leaving" @click="joinRoom" class="px-3 py-1.5 rounded bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">{{ joining ? '参加中…' : props.enterButtonLabelJa }}</button>
           <button v-if="joined" :disabled="leaving" @click="leaveRoom" class="px-3 py-1.5 rounded bg-gray-600 text-white text-sm hover:bg-gray-700 disabled:opacity-50">{{ leaving ? '退出中…' : '退出' }}</button>
         </div>
         <div class="flex items-center gap-2">
@@ -227,7 +259,7 @@ const mountTileElement = (host, tile, mode = 'camera') => {
       </div>
     </div>
 
-    <div v-if="roomId" class="space-y-2 text-sm">
+    <div v-if="props.showUrlShareUi && roomId" class="space-y-2 text-sm">
       <button @click="showShareOpen = !showShareOpen" class="px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 text-sm">URL共有 {{ showShareOpen ? '▲' : '▼' }}</button>
       <div v-if="showShareOpen" class="space-y-2">
         <p class="text-xs text-gray-600">以下のURLを相手と共有:</p>

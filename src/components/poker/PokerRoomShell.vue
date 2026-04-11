@@ -4,6 +4,10 @@ defineProps({
     type: String,
     default: 'poker-room',
   },
+  backTargetPath: {
+    type: String,
+    default: '/rooms',
+  },
   title: {
     type: String,
     default: 'Poker Room',
@@ -14,7 +18,7 @@ defineProps({
 <template>
   <main class="min-h-screen bg-gray-50 px-4 py-10">
     <div class="mx-auto w-full max-w-7xl space-y-6 rounded-xl border bg-white p-6 shadow-sm">
-      <RouterLink to="/rooms" class="text-sm text-blue-600 hover:underline">
+      <RouterLink :to="backTargetPath" class="text-sm text-blue-600 hover:underline">
         ← 部屋一覧へ戻る
       </RouterLink>
 
