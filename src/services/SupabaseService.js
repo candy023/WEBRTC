@@ -2,6 +2,9 @@ import { createClient } from '@supabase/supabase-js';
 
 // 固定ルーム一覧を DB クエリで限定するための slug 定義。
 const FIXED_ROOM_SLUGS = ['work-room', 'poker-room'];
+// nickname は RoomSelect で必須入力にするため、UI 側でも 1〜20 文字を共通制約として扱う。
+const NICKNAME_MIN_LENGTH = 1;
+const NICKNAME_MAX_LENGTH = 20;
 
 // Supabase browser client の singleton。認証状態をタブ内で共有するため 1 回だけ初期化する。
 let supabaseClient = null;
@@ -15,6 +18,20 @@ const getSupabaseEnv = () => {
   }
 
   return { url, anonKey };
+};
+
+const normalizeNickname = (nickname) => {
+  if (typeof nickname !== 'string') {
+    return '';
+  }
+
+  return nickname.trim();
+};
+
+const assertNicknameLength = (nickname) => {
+  if (nickname.length < NICKNAME_MIN_LENGTH || nickname.length > NICKNAME_MAX_LENGTH) {
+    throw new RangeError('ニックネームは1文字以上20文字以下で入力してください。');
+  }
 };
 
 /**
@@ -170,6 +187,80 @@ export async function fetchFixedRooms() {
   }
 
   return data ?? [];
+}
+
+/**
+ * Purpose: 指定 user の `profiles.nickname` を正本として取得する。
+ * Parameters:
+ * - {string} userId 取得対象の auth user id。
+ * Returns:
+ * - {Promise<string>} trim 済み nickname。未設定時は空文字。
+ * Throws:
+ * - {TypeError} `userId` が空の場合。
+ * - {Error} Supabase から profile を取得できない場合。
+ * Side effects:
+ * - `profiles` テーブルへ select クエリを実行する。
+ */
+export async function getProfileNickname(userId) {
+  if (!userId) {
+    throw new TypeError('userId is required.');
+  }
+
+  const client = getSupabaseClient();
+  const { data, error } = await client
+    .from('profiles')
+    .select('nickname')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return normalizeNickname(data?.nickname);
+}
+
+/**
+ * Purpose: 指定 user の `profiles.nickname` を保存する。
+ * Parameters:
+ * - {string} userId 保存対象の auth user id。
+ * - {string} nickname 保存する nickname。
+ * Returns:
+ * - {Promise<string>} 保存後の trim 済み nickname。
+ * Throws:
+ * - {TypeError} `userId` が空の場合。
+ * - {RangeError} nickname が 1〜20 文字要件を満たさない場合。
+ * - {Error} Supabase への保存に失敗した場合。
+ * Side effects:
+ * - `profiles` テーブルへ upsert クエリを実行する。profile 欠落時はこの upsert で補完する。
+ */
+export async function saveProfileNickname(userId, nickname) {
+  if (!userId) {
+    throw new TypeError('userId is required.');
+  }
+
+  const normalizedNickname = normalizeNickname(nickname);
+  assertNicknameLength(normalizedNickname);
+
+  const client = getSupabaseClient();
+  const { data, error } = await client
+    .from('profiles')
+    .upsert(
+      {
+        id: userId,
+        nickname: normalizedNickname,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    )
+    .select('nickname')
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return normalizeNickname(data?.nickname ?? normalizedNickname);
 }
 
 const toActiveBanState = (banRow) => {

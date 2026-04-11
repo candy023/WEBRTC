@@ -2,9 +2,11 @@
 import { onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import WebRTC_UI from '../components/WebRTC_UI.vue';
+import { resolvePolicyByRouteSegment } from '../composables/useRoomPolicy.js';
 
+const workRoomPolicy = resolvePolicyByRouteSegment('work');
 // Work room の SkyWay room 名。固定ルーム導線から入った時に query を正規化する。
-const WORK_SKYWAY_ROOM_NAME = 'work-room';
+const WORK_SKYWAY_ROOM_NAME = workRoomPolicy?.skywayRoomName ?? 'work-room';
 
 // 現在 route と router 参照。query 正規化と一覧への戻り導線に使う。
 const route = useRoute();

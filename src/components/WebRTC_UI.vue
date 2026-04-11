@@ -84,6 +84,16 @@ const shareTilesForList = computed(() => {
   return screenShareTiles.value;
 });
 
+const isViewingShare = computed(() => {
+  return selectedMainSharePubId.value !== null;
+});
+
+const shouldShowShareList = computed(() => {
+  if (!screenShareTiles.value.length) return false;
+  if (!isViewingShare.value) return true;
+  return screenShareTiles.value.length > 1;
+});
+
 const hasMainShare = computed(() => {
   return !!selectedMainShareTile.value;
 });
@@ -119,9 +129,9 @@ const shouldShowSelfPreviewTile = computed(() => {
 const cameraTileClass = (tile) => {
   if (!tile?.isLocal) return 'min-w-0';
 
-  return hasMainShare.value
-    ? 'min-w-0 w-3/4 justify-self-start sm:w-2/3 lg:w-full lg:max-w-[180px]'
-    : 'min-w-0 w-4/5 justify-self-start sm:w-3/4 lg:w-[72%] xl:w-[68%]';
+  if (!hasMainShare.value) return 'min-w-0';
+
+  return 'min-w-0 w-3/4 justify-self-start sm:w-2/3 lg:w-full lg:max-w-[180px]';
 };
 
 const applyTileVideoMode = (tile, mode) => {
@@ -231,20 +241,26 @@ const mountTileElement = (host, tile, mode = 'camera') => {
       <div :class="roomLayoutClass">
         <div :class="shareAreaClass">
           <div v-if="selectedMainShareTile" class="border rounded p-2 md:p-3 bg-gray-50 relative">
+            <button
+              type="button"
+              class="absolute top-2 right-2 z-10 px-2 py-1 rounded bg-black/60 text-white text-xs hover:bg-black/70"
+              @click="selectedMainSharePubId = null"
+            >
+              閉じる
+            </button>
             <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
           </div>
 
-          <div v-if="screenShareTiles.length > 1" class="space-y-2">
+          <div v-if="shouldShowShareList" class="space-y-2">
             <div class="text-xs text-gray-600">共有サムネイル</div>
             <div class="grid grid-cols-2 gap-2 pb-1 sm:grid-cols-3 lg:grid-cols-4">
               <div
                 v-for="tile in shareTilesForList"
                 :key="`share-${tile.pubId}`"
                 :class="[
-                  'min-w-0 w-full cursor-pointer rounded p-1',
+                  'min-w-0 w-full rounded p-1',
                   tile.pubId === selectedMainSharePubId ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-transparent'
                 ]"
-                @click="selectedMainSharePubId = tile.pubId"
               >
                 <div
                   v-if="tile.pubId === selectedMainSharePubId"
@@ -254,6 +270,22 @@ const mountTileElement = (host, tile, mode = 'camera') => {
                 </div>
                 <div v-else class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'share')" />
                 <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
+                <div class="mt-1">
+                  <span
+                    v-if="tile.pubId === selectedMainSharePubId"
+                    class="inline-block px-2 py-0.5 rounded bg-blue-600 text-white text-[10px] leading-none"
+                  >
+                    視聴中
+                  </span>
+                  <button
+                    v-else
+                    type="button"
+                    class="px-2 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700"
+                    @click="selectedMainSharePubId = tile.pubId"
+                  >
+                    配信を見る
+                  </button>
+                </div>
               </div>
             </div>
           </div>
