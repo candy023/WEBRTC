@@ -35,7 +35,7 @@ export async function findOrCreateRoom(ctx, roomId) {
 }
 
 /**
- * RoomSelect で確定した nickname を member 名として room に参加する。
+ * SkyWay join 用に生成した内部名を member 名として room に参加する。
  */
 export async function joinRoom(room, memberName) {
   if (!memberName) {

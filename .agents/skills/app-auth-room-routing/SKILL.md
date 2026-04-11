@@ -39,6 +39,7 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - RoomSelectView で nickname 未設定ユーザーの入室を止めたい
 - fixed room view から `部屋を作成` UI を取り除きたい
 - room 画面から lobby へ戻るときに leave を必須化したい
+- 表示用 nickname と SkyWay join 用内部名の受け渡しを整理したい
 
 ## Do not use this skill when
 
@@ -69,6 +70,7 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - 既存の main app 構造を壊しすぎない
 - fixed room アプリの room view に `部屋を作成` UI を残さない
 - room 画面から lobby へ戻るときは、単なる route push だけで戻さない
+- `profiles.nickname` をそのまま SkyWay join 名に渡さない
 
 ## Recommended routes
 
@@ -104,6 +106,7 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - 作業部屋
 - ポーカー部屋
 - nickname 未設定時は、部屋カードより先に入力導線を出す
+- nickname は日本語を許可してよい
 
 ### WorkRoomView
 
@@ -136,12 +139,30 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - nickname 保存成功後に部屋選択を有効化する
 - nickname 未設定時に `/rooms/work` または `/rooms/poker` へ直接アクセスした場合は `/rooms` へ戻してよい
 
-### Join display name handoff
+## Nickname display / join handoff policy
 
-- RoomSelectView で確定した nickname は、その後の room join 表示名に使う
-- room join 時にランダム名を使い続けない
-- join 用表示名の source は RoomSelectView で確定した nickname とする
-- routing skill では join 実装詳細を抱え込まず、「部屋入室前に nickname が確定している状態」を保証することを優先する
+### RoomSelectView responsibility
+
+- RoomSelectView では、ユーザーが見る表示名として `profiles.nickname` を扱う
+- RoomSelectView の nickname 入力は日本語を許可してよい
+- nickname の入力完了は UI 表示名の確定であり、SkyWay の `member.name` を直接決める操作ではない
+- RoomSelectView では、表示名と WebRTC 接続用内部名を混同しない
+
+### Join handoff responsibility
+
+- room view へ渡す値は 1 つに固定しなくてよい
+- 必要なら
+  - 表示用 nickname
+  - SkyWay join 用内部名
+  を分けて扱ってよい
+- room join 時に `profiles.nickname` をそのまま SkyWay の `member.name` に渡さない
+- routing skill では「nickname が確定していること」と「join に使う内部名が安全であること」を両立させる
+
+### Direct access behavior
+
+- nickname 未設定 user は `/rooms` で入力を完了するまで room 画面へ進ませない
+- nickname が日本語でも room 画面への遷移自体は止めない
+- room join 失敗の原因を nickname 未設定と、日本語 nickname の SkyWay 制約で混同しない
 
 ## Fixed room view behavior
 
@@ -194,9 +215,12 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - nickname 未設定時は RoomSelectView で入力が必須になる
 - nickname 未設定のまま room 画面へ進めない
 - nickname 保存後に room 選択が有効になる
-- room join 時の表示名がランダム名ではなく確定 nickname になる
+- nickname に日本語を入れて RoomSelectView を通過できる
+- room join 時に日本語 nickname がそのまま SkyWay 名へ渡っていない
+- room 参加後の UI 表示は `profiles.nickname` を優先している
+- nickname 必須化と SkyWay join 名制約の両方が両立している
 - room 参加中に `部屋一覧へ戻る` で leave が実行される
-- `/rooms` に戻った後、同じ nickname で再参加しても重複 member 名エラーにならない
+- `/rooms` に戻った後、同じユーザーで再参加しても重複 member 名エラーにならない
 - WorkRoomView / PokerRoomView に `部屋を作成` UI が表示されない
 - fixed room view が enter-only の導線になっている
 
@@ -208,12 +232,13 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - work room と poker room を同じ view に if 文で詰め込む
 - fixed room view なのに createRoom UI を残す
 - room 参加中の戻る導線を route push だけで済ませる
+- `profiles.nickname` をそのまま SkyWay join 名に使う
 
 ## Prompt template
 
 この skill を使って、ログイン画面、部屋選択画面、部屋画面の routing を最小差分で追加してください。
 ルーティングと view 導線に責務を限定し、Supabase の基盤実装や WebRTC の内部ロジックには広げないでください。
-また、RoomSelectView で nickname 未設定時の入力必須化、fixed room view の enter-only 化、`部屋一覧へ戻る` での leave 必須化を守ってください。
+また、RoomSelectView で nickname 未設定時の入力必須化、表示用 nickname と SkyWay join 用内部名の分離、fixed room view の enter-only 化、`部屋一覧へ戻る` での leave 必須化を守ってください。
 
 ## Do not expand scope
 

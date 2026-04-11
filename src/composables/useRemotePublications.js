@@ -4,6 +4,7 @@ import {
   setRemoteAudioMuteBadgeVisible,
 } from '../services/VideoUIService.js';
 import {
+  parsePublicationDisplayName,
   isVideoStream,
   removeTileFromList,
   syncSelectedMainShare,
@@ -88,6 +89,16 @@ export function useRemotePublications({
       selectedMainSharePubId.value,
       screenShareTiles.value
     );
+  };
+
+  // remote tile 表示名は publication metadata の displayName を最優先にする。
+  const resolveRemoteTileLabel = (publication) => {
+    const metadataDisplayName = parsePublicationDisplayName(publication);
+    if (metadataDisplayName) {
+      return metadataDisplayName;
+    }
+
+    return publication?.publisher?.name || publication?.publisher?.id || '参加者';
   };
 
   // 指定 pubId の tile 要素を共有帯/カメラ帯から除去し、関連 DOM と参照配列を同期する。
@@ -226,7 +237,7 @@ export function useRemotePublications({
       const tile = {
         pubId: pub.id,
         memberId: pub?.publisher?.id || '',
-        label: pub?.publisher?.name || pub?.publisher?.id || '参加者',
+        label: resolveRemoteTileLabel(pub),
         el,
         isLocal: false
       };

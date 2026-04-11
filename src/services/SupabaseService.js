@@ -34,6 +34,38 @@ const assertNicknameLength = (nickname) => {
   }
 };
 
+const normalizeSkywayMemberToken = (userId) => {
+  if (typeof userId !== 'string') {
+    return '';
+  }
+
+  return userId
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, '')
+    .replace(/[^.a-z0-9%*_-]/g, '');
+};
+
+/**
+ * Purpose: auth user id から SkyWay join 専用の ASCII 安全な member 名を生成する。
+ * Parameters:
+ * - {string} userId auth user id。
+ * Returns:
+ * - {string} SkyWay member.name に渡せる内部名。
+ * Throws:
+ * - {TypeError} `userId` から有効な内部名を作れない場合。
+ * Side effects:
+ * - なし。
+ */
+export function buildSkywayMemberName(userId) {
+  const normalizedSkywayMemberToken = normalizeSkywayMemberToken(userId);
+  if (!normalizedSkywayMemberToken) {
+    throw new TypeError('userId is required.');
+  }
+
+  return `u_${normalizedSkywayMemberToken}`;
+}
+
 /**
  * Purpose: Supabase browser client の singleton を取得する。
  * Parameters:
