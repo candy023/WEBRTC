@@ -16,6 +16,7 @@ import {
   enlargeVideo as uiEnlarge,
   shrinkVideo as uiShrink
 } from '../services/VideoUIService.js';
+import { getAuthSession, getProfileNickname } from '../services/SupabaseService.js';
 import { useLocalMediaSession } from './useLocalMediaSession.js';
 import { useLocalVideoTileSession } from './useLocalVideoTileSession.js';
 import { useMediaDevicePanels } from './useMediaDevicePanels.js';
@@ -55,6 +56,8 @@ export function useStreamReceiver() {
   const enlargedVideo = ref(null);           // 現在拡大表示されている video 要素
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
   const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
+  // room join 時に SkyWay member 名として使う表示名。`profiles.nickname` を正本として保持する。
+  const memberDisplayName = ref('');
 
   // --- 内部制御用（UI には直接返さない） ---
   const localVideoPublication = ref(null);   // 自分の映像 Publication
@@ -73,6 +76,22 @@ export function useStreamReceiver() {
   // 各 sub composable からの失敗を UI 表示用 state に集約する callback。
   const setErrorMessage = (message) => {
     errorMessage.value = message;
+  };
+
+  const loadMemberDisplayName = async () => {
+    try {
+      const session = await getAuthSession();
+      const currentUserId = session?.user?.id ?? '';
+      if (!currentUserId) {
+        memberDisplayName.value = '';
+        return;
+      }
+
+      memberDisplayName.value = await getProfileNickname(currentUserId);
+    } catch (error) {
+      memberDisplayName.value = '';
+      errorMessage.value = error?.message || String(error);
+    }
   };
 
   // useMediaDevicePanels の speaker 確定時に呼ばれる bridge callback。既存 remote audio へ出力先を再適用する処理は streamArea を保持する orchestrator 側で実行する必要がある。
@@ -303,6 +322,8 @@ export function useStreamReceiver() {
     selectedVideoInputId,
     // mic stream 生成時に使う選択済み deviceId。
     selectedAudioInputId,
+    // room join 時の SkyWay member 名として使う表示名。
+    memberDisplayName,
     // SkyWay Context/Room 参照。room create/join/leave 全体で共有する。
     context,
     // sub composable 失敗時の UI エラー反映 callback。
@@ -464,6 +485,8 @@ export function useStreamReceiver() {
 
   // 初期化処理（デバイス取得・URL クエリ反映）
   onMounted(async () => {
+    await loadMemberDisplayName();
+
     try {
       await initializeMediaDevices();
 

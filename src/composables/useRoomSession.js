@@ -18,6 +18,14 @@ import {
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
 
+const normalizeMemberDisplayName = (memberDisplayName) => {
+  if (typeof memberDisplayName !== 'string') {
+    return '';
+  }
+
+  return memberDisplayName.trim();
+};
+
 /**
  * room lifecycle と room event bind / unbind を管理する composable。
  *
@@ -42,6 +50,7 @@ import { setupRnnoise } from '../services/RnnoiseService.js';
  * @param {import('vue').Ref<boolean>} params.isRnnoiseEnabled RNNoise 有効 state。
  * @param {import('vue').Ref<string>} params.selectedVideoInputId 選択済み camera deviceId。
  * @param {import('vue').Ref<string>} params.selectedAudioInputId 選択済み mic deviceId。
+ * @param {import('vue').Ref<string>} params.memberDisplayName room join 時に使う表示名。
  * @param {{ ctx: any, room: any }} params.context SkyWay Context / Room 共有参照。
  * @param {(message: string) => void} params.setErrorMessage エラー文言更新 callback。
  * @param {() => any} params.getBlurProcessor 現在の blur processor 取得 callback。
@@ -89,6 +98,7 @@ export function useRoomSession({
   isRnnoiseEnabled,
   selectedVideoInputId,
   selectedAudioInputId,
+  memberDisplayName,
   context,
   setErrorMessage,
   getBlurProcessor,
@@ -172,13 +182,20 @@ export function useRoomSession({
   // room 参加、local publish、existing/new publication 購読開始を順序どおりに実行する。
   const joinRoom = async () => {
     if (joining.value || joined.value) return;
+
+    const nextMemberDisplayName = normalizeMemberDisplayName(memberDisplayName.value);
+    if (!nextMemberDisplayName) {
+      setErrorMessage('入室前にニックネームを設定してください。');
+      return;
+    }
+
     joining.value = true;
 
     try {
       if (!roomCreated.value || !context.room) await createRoom();
       resetRemotePublicationsForJoin();
 
-      const member = await skywayJoin(context.room);
+      const member = await skywayJoin(context.room, nextMemberDisplayName);
       localMember.value = member;
 
       clearRoomEventHandlers();

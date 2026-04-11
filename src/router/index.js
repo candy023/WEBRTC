@@ -3,7 +3,7 @@ import LoginView from '../views/LoginView.vue';
 import RoomSelectView from '../views/RoomSelectView.vue';
 import WorkRoomView from '../views/WorkRoomView.vue';
 import PokerRoomView from '../views/PokerRoomView.vue';
-import { getAuthSession } from '../services/SupabaseService.js';
+import { getAuthSession, getProfileNickname } from '../services/SupabaseService.js';
 import { useRoomJoinGuard } from '../composables/useRoomJoinGuard.js';
 import { resolvePolicyByRouteSegment } from '../composables/useRoomPolicy.js';
 
@@ -90,6 +90,15 @@ const getRouteRoomSlug = (to) => {
   return roomRecord?.meta?.roomSlug ?? null;
 };
 
+const hasProfileNickname = async (userId) => {
+  try {
+    const profileNickname = await getProfileNickname(userId);
+    return profileNickname.length > 0;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Purpose: 認証済みかどうかと room 入室可否を 1 箇所で判定し、遷移可否を決める。
  * Parameters:
@@ -126,6 +135,13 @@ const resolveGuardNavigation = async (to) => {
   const roomSlug = getRouteRoomSlug(to);
   if (!roomSlug || !currentUserId) {
     return true;
+  }
+
+  const hasNickname = await hasProfileNickname(currentUserId);
+  if (!hasNickname) {
+    return {
+      path: ROOM_SELECT_PATH,
+    };
   }
 
   const joinAvailability = await canJoinRoom({

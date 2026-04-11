@@ -4,12 +4,20 @@ const ROOM_POLICIES = Object.freeze([
     routeSegment: 'work',
     routePath: '/rooms/work',
     skywayRoomName: 'work-room',
+    displayNameJa: '作業部屋',
+    descriptionJa: '集中して作業するための通話ルームです。',
+    enterButtonLabelJa: '作業部屋に入室',
+    requiresNicknameBeforeEnter: true,
   }),
   Object.freeze({
     slug: 'poker-room',
     routeSegment: 'poker',
     routePath: '/rooms/poker',
     skywayRoomName: 'poker-room',
+    displayNameJa: 'ポーカールーム',
+    descriptionJa: '通話しながらポーカーを遊ぶためのルームです。',
+    enterButtonLabelJa: 'ポーカールームに入室',
+    requiresNicknameBeforeEnter: true,
   }),
 ]);
 

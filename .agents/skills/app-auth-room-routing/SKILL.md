@@ -137,3 +137,36 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 ## Do not expand scope
 
 この skill で Supabase schema 実装、room_kind policy 実装、Poker state 同期、WebRTC core の改造まで広げない。
+
+## Nickname gate policy
+
+### RoomSelectView nickname requirement
+
+- RoomSelectView では、入室前に表示名を確定させる
+- `profiles.nickname` が未設定なら、RoomSelectView で入力必須にする
+- nickname 未設定のまま `/rooms/work` や `/rooms/poker` へ進ませない
+- nickname 入力と保存は RoomSelectView で完結させる
+- ログイン直後に nickname が未設定なら、RoomSelectView 上で入力導線を最優先表示する
+- route guard で細かい UI を持たず、view 側で入力 UI、guard 側で入室禁止を分担する
+
+### Routing behavior for nickname completion
+
+- `/login` 通過後は `/rooms` へ進めてよい
+- ただし `/rooms` で nickname 未設定なら、部屋カードより先に nickname 入力を促す
+- nickname 保存成功後に部屋選択を有効化する
+- nickname 未設定時に `/rooms/work` または `/rooms/poker` へ直接アクセスした場合は `/rooms` へ戻してよい
+
+### Join display name handoff
+
+- RoomSelectView で確定した nickname は、その後の room join 表示名に使う
+- room join 時にランダム名を使い続けない
+- join 用表示名の source は RoomSelectView で確定した nickname とする
+- routing skill では join 実装詳細を抱え込まず、「部屋入室前に nickname が確定している状態」を保証することを優先する
+
+## Verification checklist addendum
+
+- ログイン後に `/rooms` へ進める
+- nickname 未設定時は RoomSelectView で入力が必須になる
+- nickname 未設定のまま room 画面へ進めない
+- nickname 保存後に room 選択が有効になる
+- room join 時の表示名がランダム名ではなく確定 nickname になる

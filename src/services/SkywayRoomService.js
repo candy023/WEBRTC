@@ -1,4 +1,4 @@
-import { SkyWayContext, SkyWayRoom, uuidV4 } from '@skyway-sdk/room';
+import { SkyWayContext, SkyWayRoom } from '@skyway-sdk/room';
 import GetToken from '../components/SkywayToken.js';
 
 /**
@@ -35,11 +35,15 @@ export async function findOrCreateRoom(ctx, roomId) {
 }
 
 /**
- * ランダムな member 名で room に参加する。
+ * RoomSelect で確定した nickname を member 名として room に参加する。
  */
-export async function joinRoom(room) {
+export async function joinRoom(room, memberName) {
+  if (!memberName) {
+    throw new TypeError('memberName is required.');
+  }
+
   return room.join({
-    name: uuidV4(),
+    name: memberName,
   });
 }
 
