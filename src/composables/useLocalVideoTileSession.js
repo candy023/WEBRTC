@@ -1,6 +1,14 @@
 import { ensureLocalTileElement } from '../services/VideoUIService.js';
 import { isScreenPublication } from './helpers/useVideoTiles.js';
 
+const normalizeDisplayName = (displayName) => {
+  if (typeof displayName !== 'string') {
+    return '';
+  }
+
+  return displayName.trim();
+};
+
 /**
  * local tile / blur / metadata の glue を管理する composable。
  *
@@ -31,6 +39,7 @@ import { isScreenPublication } from './helpers/useVideoTiles.js';
 export function useLocalVideoTileSession({
   localMember,
   localVideoPublication,
+  memberDisplayName,
   localVideoStream,
   screenShareTiles,
   cameraFilmstripTiles,
@@ -84,10 +93,12 @@ export function useLocalVideoTileSession({
     localTileContainerEl.dataset.memberId = localMember.value.id;
     localTileContainerEl.dataset.pubId = publication.id;
 
+    // local tile の表示名は join 内部名ではなく、`profiles.nickname` を優先する。
+    const localTileDisplayName = normalizeDisplayName(memberDisplayName?.value);
     const tile = {
       pubId: publication.id,
       memberId: localMember.value.id,
-      label: 'あなた',
+      label: localTileDisplayName || 'あなた',
       el: localTileContainerEl,
       isLocal: true
     };
@@ -104,7 +115,12 @@ export function useLocalVideoTileSession({
   // local video publication metadata の kind を更新し、camera/screen の表示責務を維持する。
   const updateLocalVideoPublicationMetadata = async (kind) => {
     try {
-      await localVideoPublication.value?.updateMetadata?.(JSON.stringify({ kind }));
+      // remote 側タイルでも `profiles.nickname` を優先表示できるよう metadata に表示名を残す。
+      const publicationDisplayName = normalizeDisplayName(memberDisplayName?.value);
+      const nextMetadata = publicationDisplayName
+        ? { kind, displayName: publicationDisplayName }
+        : { kind };
+      await localVideoPublication.value?.updateMetadata?.(JSON.stringify(nextMetadata));
     } catch {}
   };
 

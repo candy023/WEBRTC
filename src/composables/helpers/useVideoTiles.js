@@ -18,6 +18,25 @@ export function parsePublicationKind(publication) {
 }
 
 /**
+ * publication metadata から表示名を取り出す。
+ *
+ * @param {import('@skyway-sdk/room').Publication | null | undefined} publication
+ * @returns {string} 表示名。取得できない場合は空文字。
+ * @throws {never}
+ * @sideeffects なし
+ */
+export function parsePublicationDisplayName(publication) {
+  if (!publication?.metadata) return '';
+
+  try {
+    const parsed = JSON.parse(publication.metadata);
+    if (typeof parsed?.displayName === 'string') return parsed.displayName.trim();
+  } catch {}
+
+  return '';
+}
+
+/**
  * publication が画面共有かどうかを判定する。
  *
  * @param {import('@skyway-sdk/room').Publication | null | undefined} publication

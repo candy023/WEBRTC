@@ -16,7 +16,11 @@ import {
   enlargeVideo as uiEnlarge,
   shrinkVideo as uiShrink
 } from '../services/VideoUIService.js';
-import { getAuthSession, getProfileNickname } from '../services/SupabaseService.js';
+import {
+  buildSkywayMemberName,
+  getAuthSession,
+  getProfileNickname,
+} from '../services/SupabaseService.js';
 import { useLocalMediaSession } from './useLocalMediaSession.js';
 import { useLocalVideoTileSession } from './useLocalVideoTileSession.js';
 import { useMediaDevicePanels } from './useMediaDevicePanels.js';
@@ -56,8 +60,10 @@ export function useStreamReceiver() {
   const enlargedVideo = ref(null);           // 現在拡大表示されている video 要素
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
   const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
-  // room join 時に SkyWay member 名として使う表示名。`profiles.nickname` を正本として保持する。
+  // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
   const memberDisplayName = ref('');
+  // SkyWay join 専用の内部名。`profiles.nickname` と分離して member.name 制約を満たす。
+  const memberJoinName = ref('');
 
   // --- 内部制御用（UI には直接返さない） ---
   const localVideoPublication = ref(null);   // 自分の映像 Publication
@@ -84,12 +90,15 @@ export function useStreamReceiver() {
       const currentUserId = session?.user?.id ?? '';
       if (!currentUserId) {
         memberDisplayName.value = '';
+        memberJoinName.value = '';
         return;
       }
 
+      memberJoinName.value = buildSkywayMemberName(currentUserId);
       memberDisplayName.value = await getProfileNickname(currentUserId);
     } catch (error) {
       memberDisplayName.value = '';
+      memberJoinName.value = '';
       errorMessage.value = error?.message || String(error);
     }
   };
@@ -230,6 +239,7 @@ export function useStreamReceiver() {
     // local tile の DOM 参照を更新する accessor。
     setLocalTileElements,
   } = useLocalVideoTileSession({
+    memberDisplayName,
     // local tile の memberId/pubId を同期するための local member 参照。
     localMember,
     // metadata 更新と local tile 種別判定に使う local video publication 参照。
@@ -288,6 +298,8 @@ export function useStreamReceiver() {
     // room 退出、event unbind、join 関連 state cleanup を行う handler。
     leaveRoom,
   } = useRoomSession({
+    // SkyWay join だけで使う ASCII 安全な内部名。
+    memberJoinName,
     // room 識別子。createRoom 時の room 生成キーに使う。
     roomId,
     // room 作成済み state。join 前の createRoom 要否判定に使う。
@@ -322,7 +334,7 @@ export function useStreamReceiver() {
     selectedVideoInputId,
     // mic stream 生成時に使う選択済み deviceId。
     selectedAudioInputId,
-    // room join 時の SkyWay member 名として使う表示名。
+    // room 参加後の UI 表示に使う `profiles.nickname`。
     memberDisplayName,
     // SkyWay Context/Room 参照。room create/join/leave 全体で共有する。
     context,

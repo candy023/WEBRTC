@@ -26,6 +26,14 @@ const normalizeMemberDisplayName = (memberDisplayName) => {
   return memberDisplayName.trim();
 };
 
+const normalizeMemberJoinName = (memberJoinName) => {
+  if (typeof memberJoinName !== 'string') {
+    return '';
+  }
+
+  return memberJoinName.trim();
+};
+
 /**
  * room lifecycle と room event bind / unbind を管理する composable。
  *
@@ -99,6 +107,7 @@ export function useRoomSession({
   selectedVideoInputId,
   selectedAudioInputId,
   memberDisplayName,
+  memberJoinName,
   context,
   setErrorMessage,
   getBlurProcessor,
@@ -189,13 +198,20 @@ export function useRoomSession({
       return;
     }
 
+    // SkyWay の member.name 制約を満たす join 専用内部名。UI 表示名とは責務を分離する。
+    const nextMemberJoinName = normalizeMemberJoinName(memberJoinName.value);
+    if (!nextMemberJoinName) {
+      setErrorMessage('ログイン状態を確認できませんでした。再ログインしてください。');
+      return;
+    }
+
     joining.value = true;
 
     try {
       if (!roomCreated.value || !context.room) await createRoom();
       resetRemotePublicationsForJoin();
 
-      const member = await skywayJoin(context.room, nextMemberDisplayName);
+      const member = await skywayJoin(context.room, nextMemberJoinName);
       localMember.value = member;
 
       clearRoomEventHandlers();
