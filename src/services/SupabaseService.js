@@ -5,6 +5,8 @@ const FIXED_ROOM_SLUGS = ['work-room', 'poker-room'];
 // nickname は RoomSelect で必須入力にするため、UI 側でも 1〜20 文字を共通制約として扱う。
 const NICKNAME_MIN_LENGTH = 1;
 const NICKNAME_MAX_LENGTH = 20;
+// Email OTP コードの共通桁数。supabase dashboard 設定と揃えて扱う。
+const EMAIL_OTP_CODE_LENGTH = 6;
 
 // Supabase browser client の singleton。認証状態をタブ内で共有するため 1 回だけ初期化する。
 let supabaseClient = null;
@@ -31,6 +33,34 @@ const normalizeNickname = (nickname) => {
 const assertNicknameLength = (nickname) => {
   if (nickname.length < NICKNAME_MIN_LENGTH || nickname.length > NICKNAME_MAX_LENGTH) {
     throw new RangeError('ニックネームは1文字以上20文字以下で入力してください。');
+  }
+};
+
+const normalizeAuthEmail = (email) => {
+  if (typeof email !== 'string') {
+    return '';
+  }
+
+  return email.trim();
+};
+
+const assertAuthEmail = (email) => {
+  if (!email) {
+    throw new TypeError('email is required.');
+  }
+};
+
+const normalizeEmailOtpToken = (token) => {
+  if (typeof token !== 'string') {
+    return '';
+  }
+
+  return token.trim();
+};
+
+const assertEmailOtpTokenLength = (token) => {
+  if (token.length !== EMAIL_OTP_CODE_LENGTH) {
+    throw new RangeError('OTP コードは6桁で入力してください。');
   }
 };
 
@@ -126,6 +156,92 @@ export async function signInWithGoogle(redirectTo = window.location.origin) {
  * Side effects:
  * - Supabase auth ストレージにアクセスして session を読み出す。
  */
+/**
+ * Purpose: Discord OAuth でログインを開始する。
+ * Parameters:
+ * - {string} [redirectTo] 認証完了後に戻す絶対 URL。未指定時は現在 origin を使う。
+ * Returns:
+ * - {Promise<void>}
+ * Throws:
+ * - {Error} Supabase 側の認証開始に失敗した場合。
+ * Side effects:
+ * - ブラウザを Supabase Auth の Discord 認証画面へ遷移させる。
+ */
+export async function signInWithDiscord(redirectTo = window.location.origin) {
+  const client = getSupabaseClient();
+  const { error } = await client.auth.signInWithOAuth({
+    provider: 'discord',
+    options: { redirectTo },
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+/**
+ * Purpose: Email OTP（コード入力型）を送信する。
+ * Parameters:
+ * - {string} email OTP を送信するメールアドレス。
+ * Returns:
+ * - {Promise<string>} trim 済みのメールアドレス。
+ * Throws:
+ * - {TypeError} `email` が空の場合。
+ * - {Error} Supabase 側の OTP 送信に失敗した場合。
+ * Side effects:
+ * - Supabase Auth から対象メールへ OTP コード送信を依頼する。
+ */
+export async function sendEmailOtp(email) {
+  const normalizedEmail = normalizeAuthEmail(email);
+  assertAuthEmail(normalizedEmail);
+
+  const client = getSupabaseClient();
+  const { error } = await client.auth.signInWithOtp({
+    email: normalizedEmail,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return normalizedEmail;
+}
+
+/**
+ * Purpose: Email OTP（コード入力型）を検証してセッションを確立する。
+ * Parameters:
+ * - {string} email OTP 送信先メールアドレス。
+ * - {string} token ユーザー入力の OTP コード。
+ * Returns:
+ * - {Promise<import('@supabase/supabase-js').Session | null>} 検証後の session。
+ * Throws:
+ * - {TypeError} `email` が空の場合。
+ * - {RangeError} OTP コード桁数が不正な場合。
+ * - {Error} Supabase 側の OTP 検証に失敗した場合。
+ * Side effects:
+ * - Supabase Auth に OTP 検証を依頼し、成功時は auth session を更新する。
+ */
+export async function verifyEmailOtp(email, token) {
+  const normalizedEmail = normalizeAuthEmail(email);
+  assertAuthEmail(normalizedEmail);
+
+  const normalizedToken = normalizeEmailOtpToken(token);
+  assertEmailOtpTokenLength(normalizedToken);
+
+  const client = getSupabaseClient();
+  const { data, error } = await client.auth.verifyOtp({
+    email: normalizedEmail,
+    token: normalizedToken,
+    type: 'email',
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data.session ?? null;
+}
+
 export async function getAuthSession() {
   const client = getSupabaseClient();
   const { data, error } = await client.auth.getSession();
