@@ -25,6 +25,14 @@ async function applyAudioOutputDevice(audioEl, deviceId) {
 	}
 }
 
+function normalizeVolumePercent(volumePercent) {
+	const numeric = Number(volumePercent);
+	if (!Number.isFinite(numeric)) return 100;
+	if (numeric < 0) return 0;
+	if (numeric > 100) return 100;
+	return numeric;
+}
+
 /**
  * streamArea 配下の全 remote audio 要素へ、選択中スピーカー出力先を再適用する。
  *
@@ -40,6 +48,28 @@ export async function setRemoteAudioOutput(streamAreaEl, deviceId) {
 	// 現在存在する remote audio 要素を列挙し、遅延追加前の既存要素へ即時反映する。
 	const audioEls = Array.from(streamAreaEl.querySelectorAll('audio'));
 	await Promise.allSettled(audioEls.map((el) => applyAudioOutputDevice(el, deviceId)));
+}
+
+/**
+ * 指定 memberId の remote audio 要素へ音量を適用する。
+ *
+ * @param {HTMLElement | null | undefined} streamAreaEl remote audio 要素を持つコンテナ。
+ * @param {string} memberId 対象 participant の memberId。
+ * @param {number} volumePercent 適用する音量パーセント（0〜100）。
+ * @returns {void}
+ * @throws {never}
+ * @sideeffects 対象 audio 要素の volume を更新する
+ */
+export function setRemoteParticipantVolume(streamAreaEl, memberId, volumePercent) {
+	if (!streamAreaEl || !memberId) return;
+
+	const normalizedPercent = normalizeVolumePercent(volumePercent);
+	const normalizedVolume = normalizedPercent / 100;
+	const audioEls = Array.from(streamAreaEl.querySelectorAll('audio[data-member-id]'));
+	for (const audioEl of audioEls) {
+		if (audioEl?.dataset?.memberId !== memberId) continue;
+		audioEl.volume = normalizedVolume;
+	}
 }
 
 /**
@@ -64,6 +94,24 @@ export function setRemoteAudioMuteBadgeVisible(streamAreaEl, memberId, visible) 
 
 		badgeEl.classList.toggle('hidden', !visible);
 	}
+}
+
+/**
+ * local タイルの mic mute バッジ表示を更新する。
+ *
+ * @param {HTMLElement | null | undefined} localTileEl local camera tile の container 要素。
+ * @param {boolean} visible true のとき表示、false のとき非表示。
+ * @returns {void}
+ * @throws {never}
+ * @sideeffects local tile バッジの classList を更新する
+ */
+export function setLocalAudioMuteBadgeVisible(localTileEl, visible) {
+	if (!localTileEl) return;
+
+	const badgeEl = localTileEl.querySelector('[data-local-audio-muted-badge="1"]');
+	if (!badgeEl) return;
+
+	badgeEl.classList.toggle('hidden', !visible);
 }
 
 /**
@@ -109,8 +157,15 @@ export function ensureLocalTileElement({
 		} catch {}
 	};
 
+	const localAudioMuteBadge = document.createElement('span');
+	localAudioMuteBadge.textContent = '\u{1F507}';
+	localAudioMuteBadge.dataset.localAudioMutedBadge = '1';
+	localAudioMuteBadge.className =
+		'hidden absolute bottom-2 right-2 bg-black bg-opacity-60 text-white px-1.5 py-0.5 rounded text-xs pointer-events-none';
+
 	containerEl.appendChild(videoEl);
 	containerEl.appendChild(enlargeBtn);
+	containerEl.appendChild(localAudioMuteBadge);
 
 	return { containerEl, videoEl };
 }
@@ -125,7 +180,10 @@ export function ensureLocalTileElement({
  * ・DOM に要素を追加し、即座に再生を開始する
  */
 export function attachRemoteStream(streamAreaEl, stream, publication, options = {}) {
-	const { audioOutputDeviceId = '' } = options;
+	const {
+		audioOutputDeviceId = '',
+		audioVolumePercent = 100,
+	} = options;
 	if (!streamAreaEl) return;
 
 	const hasVideo = !!(
@@ -188,6 +246,8 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 		el.autoplay = true;
 		el.controls = false;
 		el.style.display = 'none';
+		if (publication?.publisher?.id) el.dataset.memberId = publication.publisher.id;
+		el.volume = normalizeVolumePercent(audioVolumePercent) / 100;
 
 		streamAreaEl.appendChild(el);
 		stream.attach(el);
