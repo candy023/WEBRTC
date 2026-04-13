@@ -122,6 +122,7 @@ const hasShareTiles = computed(() => {
 });
 
 const selectedMainCameraMemberId = ref(null);
+const isMobileViewport = ref(false);
 const participantMenu = ref({
   visible: false,
   x: 0,
@@ -172,6 +173,10 @@ const currentMenuVolume = computed(() => {
   }
 
   return getRemoteParticipantVolume(participantMenu.value.memberId);
+});
+
+const shouldShowMobileVolumeSection = computed(() => {
+  return isMobileViewport.value && !participantMenu.value.isLocal;
 });
 
 const roomLayoutClass = computed(() => {
@@ -252,18 +257,43 @@ const closeParticipantMenu = () => {
   };
 };
 
-const openParticipantMenu = (event, tile) => {
+const updateMobileViewport = () => {
+  if (typeof window === 'undefined') return;
+  isMobileViewport.value = window.matchMedia('(max-width: 767px)').matches;
+};
+
+const openParticipantMenuWithTile = (tile, options = {}) => {
   if (!tile?.memberId) return;
+  const {
+    x = 0,
+    y = 0,
+    volumeOpen = false,
+  } = options;
 
   participantMenu.value = {
     visible: true,
-    x: event.clientX,
-    y: event.clientY,
+    x,
+    y,
     memberId: tile.memberId,
     pubId: tile.pubId || '',
     isLocal: !!tile.isLocal,
-    volumeOpen: false,
+    volumeOpen: !tile.isLocal && volumeOpen,
   };
+};
+
+const openParticipantMenu = (event, tile) => {
+  if (isMobileViewport.value) return;
+  openParticipantMenuWithTile(tile, {
+    x: event?.clientX ?? 0,
+    y: event?.clientY ?? 0,
+  });
+};
+
+const openParticipantSheet = (tile) => {
+  if (!isMobileViewport.value) return;
+  openParticipantMenuWithTile(tile, {
+    volumeOpen: !tile?.isLocal,
+  });
 };
 
 const pinParticipantAsMain = () => {
@@ -297,6 +327,11 @@ const handleGlobalPointerDown = (event) => {
   closeParticipantMenu();
 };
 
+const handleWindowResize = () => {
+  updateMobileViewport();
+  closeParticipantMenu();
+};
+
 watch(hasShareTiles, (value) => {
   if (!value) return;
   selectedMainCameraMemberId.value = null;
@@ -323,14 +358,15 @@ watch(cameraFilmstripTiles, (tiles) => {
 });
 
 onMounted(() => {
+  updateMobileViewport();
   window.addEventListener('pointerdown', handleGlobalPointerDown);
-  window.addEventListener('resize', closeParticipantMenu);
+  window.addEventListener('resize', handleWindowResize);
   window.addEventListener('scroll', closeParticipantMenu, true);
 });
 
 onUnmounted(() => {
   window.removeEventListener('pointerdown', handleGlobalPointerDown);
-  window.removeEventListener('resize', closeParticipantMenu);
+  window.removeEventListener('resize', handleWindowResize);
   window.removeEventListener('scroll', closeParticipantMenu, true);
 });
 
@@ -432,6 +468,14 @@ onBeforeRouteLeave(async () => {
             @contextmenu.prevent="openParticipantMenu($event, selectedMainCameraTile)"
           >
             <button
+              v-if="isMobileViewport"
+              type="button"
+              class="absolute top-2 right-12 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+              @click.stop="openParticipantSheet(selectedMainCameraTile)"
+            >
+              ⋮
+            </button>
+            <button
               type="button"
               class="absolute top-2 right-2 z-10 px-2 py-1 rounded bg-black/60 text-white text-xs hover:bg-black/70"
               @click="clearMainParticipant"
@@ -490,6 +534,14 @@ onBeforeRouteLeave(async () => {
               @contextmenu.prevent="openParticipantMenu($event, localSelfPreviewMenuTile)"
             >
               <div class="relative w-full aspect-video bg-black rounded overflow-hidden border border-white/30">
+                <button
+                  v-if="isMobileViewport"
+                  type="button"
+                  class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+                  @click.stop="openParticipantSheet(localSelfPreviewMenuTile)"
+                >
+                  ⋮
+                </button>
                 <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
                 <span
                   v-if="isAudioMuted"
@@ -506,7 +558,17 @@ onBeforeRouteLeave(async () => {
               :class="cameraTileClass(tile)"
               @contextmenu.prevent="openParticipantMenu($event, tile)"
             >
-              <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+              <div class="relative">
+                <button
+                  v-if="isMobileViewport"
+                  type="button"
+                  class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+                  @click.stop="openParticipantSheet(tile)"
+                >
+                  ⋮
+                </button>
+                <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+              </div>
               <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
             </div>
           </div>
@@ -514,7 +576,7 @@ onBeforeRouteLeave(async () => {
       </div>
 
       <div
-        v-if="participantMenu.visible"
+        v-if="participantMenu.visible && !isMobileViewport"
         data-participant-menu="1"
         class="fixed z-50 min-w-[180px] rounded border bg-white shadow-lg"
         :style="{ left: `${participantMenu.x}px`, top: `${participantMenu.y}px` }"
@@ -560,6 +622,69 @@ onBeforeRouteLeave(async () => {
             @input="handleMenuVolumeInput"
           />
           <div class="text-[11px] text-gray-500">{{ currentMenuVolume }}%</div>
+        </div>
+      </div>
+
+      <div
+        v-if="participantMenu.visible && isMobileViewport"
+        class="fixed inset-0 z-50 bg-black/35"
+        @click="closeParticipantMenu"
+      >
+        <div
+          data-participant-menu="1"
+          class="absolute inset-x-0 bottom-0 rounded-t-2xl bg-white px-4 pt-3 pb-5 shadow-2xl space-y-2"
+          @click.stop
+        >
+          <div class="mx-auto h-1.5 w-10 rounded-full bg-gray-300" />
+          <button
+            v-if="!hasShareTiles && !isMenuTargetMainCamera"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="pinParticipantAsMain"
+          >
+            主表示にする
+          </button>
+          <button
+            v-if="!hasShareTiles && isMenuTargetMainCamera"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="clearMainParticipant"
+          >
+            主表示を解除
+          </button>
+          <div
+            v-if="hasShareTiles"
+            class="px-3 py-2 text-xs text-gray-500"
+          >
+            共有中は主表示を変更できません
+          </div>
+          <button
+            v-if="!participantMenu.isLocal"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="toggleVolumeMenu"
+          >
+            音量を調整
+          </button>
+          <div v-if="shouldShowMobileVolumeSection && participantMenu.volumeOpen" class="rounded border px-3 py-3 space-y-2">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              :value="currentMenuVolume"
+              class="w-full"
+              @input="handleMenuVolumeInput"
+            />
+            <div class="text-xs text-gray-500">{{ currentMenuVolume }}%</div>
+          </div>
+          <button
+            type="button"
+            class="mt-1 block w-full rounded border px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+            @click="closeParticipantMenu"
+          >
+            閉じる
+          </button>
         </div>
       </div>
 
