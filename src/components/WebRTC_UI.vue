@@ -289,10 +289,28 @@ const openParticipantMenu = (event, tile) => {
   });
 };
 
-const openParticipantSheet = (tile) => {
-  if (!isMobileViewport.value) return;
+const openParticipantMenuFromButton = (event, tile) => {
+  if (isMobileViewport.value) {
+    openParticipantMenuWithTile(tile, {
+      volumeOpen: !tile?.isLocal,
+    });
+    return;
+  }
+
+  const rect = event?.currentTarget?.getBoundingClientRect?.();
+  const estimatedMenuWidth = 180;
+  let x = rect ? rect.right - estimatedMenuWidth : (event?.clientX ?? 0);
+  let y = rect ? rect.bottom + 4 : (event?.clientY ?? 0);
+  if (typeof window !== 'undefined') {
+    const maxX = window.innerWidth - estimatedMenuWidth - 8;
+    const maxY = window.innerHeight - 8;
+    x = Math.min(Math.max(8, x), Math.max(8, maxX));
+    y = Math.min(Math.max(8, y), Math.max(8, maxY));
+  }
+
   openParticipantMenuWithTile(tile, {
-    volumeOpen: !tile?.isLocal,
+    x: Math.round(x),
+    y: Math.round(y),
   });
 };
 
@@ -468,10 +486,9 @@ onBeforeRouteLeave(async () => {
             @contextmenu.prevent="openParticipantMenu($event, selectedMainCameraTile)"
           >
             <button
-              v-if="isMobileViewport"
               type="button"
               class="absolute top-2 right-12 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
-              @click.stop="openParticipantSheet(selectedMainCameraTile)"
+              @click.stop="openParticipantMenuFromButton($event, selectedMainCameraTile)"
             >
               ⋮
             </button>
@@ -535,10 +552,9 @@ onBeforeRouteLeave(async () => {
             >
               <div class="relative w-full aspect-video bg-black rounded overflow-hidden border border-white/30">
                 <button
-                  v-if="isMobileViewport"
                   type="button"
                   class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
-                  @click.stop="openParticipantSheet(localSelfPreviewMenuTile)"
+                  @click.stop="openParticipantMenuFromButton($event, localSelfPreviewMenuTile)"
                 >
                   ⋮
                 </button>
@@ -560,10 +576,9 @@ onBeforeRouteLeave(async () => {
             >
               <div class="relative">
                 <button
-                  v-if="isMobileViewport"
                   type="button"
                   class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
-                  @click.stop="openParticipantSheet(tile)"
+                  @click.stop="openParticipantMenuFromButton($event, tile)"
                 >
                   ⋮
                 </button>
