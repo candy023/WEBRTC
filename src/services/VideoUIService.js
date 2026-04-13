@@ -85,20 +85,28 @@ export function setRemoteParticipantVolume(streamAreaEl, memberId, volumePercent
 export function setRemoteAudioMuteBadgeVisible(streamAreaEl, memberId, visible) {
 	if (!memberId) return;
 
-	let tileEls = [];
+	const updateMuteBadgeInTiles = (tileEls) => {
+		let updated = false;
+		for (const tileEl of tileEls) {
+			if (tileEl?.dataset?.memberId !== memberId) continue;
+
+			const badgeEl = tileEl.querySelector('[data-audio-muted-badge="1"]');
+			if (!badgeEl) continue;
+
+			badgeEl.classList.toggle('hidden', !visible);
+			updated = true;
+		}
+		return updated;
+	};
+
 	if (streamAreaEl) {
-		tileEls = Array.from(streamAreaEl.querySelectorAll('[data-member-id]'));
+		const streamAreaTiles = Array.from(streamAreaEl.querySelectorAll('[data-member-id]'));
+		if (updateMuteBadgeInTiles(streamAreaTiles)) return;
 	}
-	if (!tileEls.length && typeof document !== 'undefined') {
-		tileEls = Array.from(document.querySelectorAll('[data-member-id]'));
-	}
-	for (const tileEl of tileEls) {
-		if (tileEl?.dataset?.memberId !== memberId) continue;
 
-		const badgeEl = tileEl.querySelector('[data-audio-muted-badge="1"]');
-		if (!badgeEl) continue;
-
-		badgeEl.classList.toggle('hidden', !visible);
+	if (typeof document !== 'undefined') {
+		const allTiles = Array.from(document.querySelectorAll('[data-member-id]'));
+		updateMuteBadgeInTiles(allTiles);
 	}
 }
 
