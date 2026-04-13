@@ -1,6 +1,6 @@
 ---
 name: webrtc-mobile-actions
-description: WebRTC UI のスマホ操作を最小差分で追加し、参加者タイルの ⋮ ボタンから主表示切替や個別音量調整を使えるようにする
+description: WebRTC UI に対して、参加者タイルの ⋮ ボタンや右クリックメニュー、レイアウト内主表示、ミュート可視化、参加者ごとの音量調整を最小差分で追加・改善する
 ---
 
 # webrtc-mobile-actions
@@ -18,7 +18,7 @@ description: WebRTC UI のスマホ操作を最小差分で追加し、参加者
 - 参加者タイルごとの操作をスマホでも自然に行いたいとき
 - 既存の WebRTC 接続フローを変えずに、スマホ UI だけ追加したいとき
 - ボトムシートや簡易アクションシートを最小差分で追加したいとき
-
+- PC とスマホで参加者アクションの入口を揃えたいとき
 ## この Skill を使わない場面
 - late join 不具合の修正
 - subscribeExisting / onStreamPublished の責務見直し
