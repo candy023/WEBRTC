@@ -3,7 +3,10 @@ import {
   getAuthSession,
   getCurrentUser,
   onAuthStateChange,
+  sendEmailOtp,
+  signInWithDiscord,
   signInWithGoogle,
+  verifyEmailOtp,
 } from '../services/SupabaseService.js';
 
 /**
@@ -17,7 +20,10 @@ import {
  *   authLoading: import('vue').Ref<boolean>,
  *   authErrorMessage: import('vue').Ref<string>,
  *   refreshAuthSession: () => Promise<void>,
- *   loginWithGoogle: (redirectTo?: string) => Promise<void>,
+ *   loginWithDiscord: (redirectTo?: string) => Promise<boolean>,
+ *   loginWithGoogle: (redirectTo?: string) => Promise<boolean>,
+ *   requestEmailOtpCode: (email: string) => Promise<string>,
+ *   loginWithEmailOtpCode: (params: { email: string, token: string }) => Promise<boolean>,
  * }}
  * Throws:
  * - {never} すべての失敗は `authErrorMessage` へ集約する。
@@ -54,7 +60,7 @@ export function useAuthSession() {
    * Parameters:
    * - なし
    * Returns:
-   * - {Promise<void>}
+   * - {Promise<boolean>}
    * Throws:
    * - {never} 失敗時は `authErrorMessage` に反映する。
    * Side effects:
@@ -92,8 +98,49 @@ export function useAuthSession() {
 
     try {
       await signInWithGoogle(redirectTo);
+      return true;
     } catch (error) {
       authErrorMessage.value = error?.message || String(error);
+      return false;
+    }
+  };
+
+  // Discord OAuth の開始専用。ログイン画面でのボタン押下時にだけ使う。
+  const loginWithDiscord = async (redirectTo) => {
+    authErrorMessage.value = '';
+
+    try {
+      await signInWithDiscord(redirectTo);
+      return true;
+    } catch (error) {
+      authErrorMessage.value = error?.message || String(error);
+      return false;
+    }
+  };
+
+  // Email OTP の送信専用。成功時は送信に使った正規化済みメールを返す。
+  const requestEmailOtpCode = async (email) => {
+    authErrorMessage.value = '';
+
+    try {
+      return await sendEmailOtp(email);
+    } catch (error) {
+      authErrorMessage.value = error?.message || String(error);
+      return '';
+    }
+  };
+
+  // Email OTP のコード検証専用。成功時は session を再読込して UI state を同期する。
+  const loginWithEmailOtpCode = async ({ email, token }) => {
+    authErrorMessage.value = '';
+
+    try {
+      await verifyEmailOtp(email, token);
+      await refreshAuthSession();
+      return true;
+    } catch (error) {
+      authErrorMessage.value = error?.message || String(error);
+      return false;
     }
   };
 
@@ -131,6 +178,9 @@ export function useAuthSession() {
     authLoading,
     authErrorMessage,
     refreshAuthSession,
+    loginWithDiscord,
     loginWithGoogle,
+    requestEmailOtpCode,
+    loginWithEmailOtpCode,
   };
 }
