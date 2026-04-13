@@ -83,9 +83,15 @@ export function setRemoteParticipantVolume(streamAreaEl, memberId, volumePercent
  * @sideeffects 該当タイルのバッジDOM classList を更新する。
  */
 export function setRemoteAudioMuteBadgeVisible(streamAreaEl, memberId, visible) {
-	if (!streamAreaEl || !memberId) return;
+	if (!memberId) return;
 
-	const tileEls = Array.from(streamAreaEl.querySelectorAll('[data-member-id]'));
+	let tileEls = [];
+	if (streamAreaEl) {
+		tileEls = Array.from(streamAreaEl.querySelectorAll('[data-member-id]'));
+	}
+	if (!tileEls.length && typeof document !== 'undefined') {
+		tileEls = Array.from(document.querySelectorAll('[data-member-id]'));
+	}
 	for (const tileEl of tileEls) {
 		if (tileEl?.dataset?.memberId !== memberId) continue;
 
@@ -146,17 +152,6 @@ export function ensureLocalTileElement({
 	videoEl.muted = true;
 	videoEl.className = 'w-full h-full object-cover';
 
-	const enlargeBtn = document.createElement('button');
-	enlargeBtn.innerHTML = '&#9974;';
-	enlargeBtn.className =
-		'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
-	enlargeBtn.onclick = (event) => {
-		event.stopPropagation();
-		try {
-			onEnlarge?.(videoEl);
-		} catch {}
-	};
-
 	const localAudioMuteBadge = document.createElement('span');
 	localAudioMuteBadge.textContent = '\u{1F507}';
 	localAudioMuteBadge.dataset.localAudioMutedBadge = '1';
@@ -164,7 +159,6 @@ export function ensureLocalTileElement({
 		'hidden absolute bottom-2 right-2 bg-black bg-opacity-60 text-white px-1.5 py-0.5 rounded text-xs pointer-events-none';
 
 	containerEl.appendChild(videoEl);
-	containerEl.appendChild(enlargeBtn);
 	containerEl.appendChild(localAudioMuteBadge);
 
 	return { containerEl, videoEl };
@@ -218,18 +212,6 @@ export function attachRemoteStream(streamAreaEl, stream, publication, options = 
 				errorMessage: error?.message,
 			});
 		});
-
-		const enlargeBtn = document.createElement('button');
-		enlargeBtn.innerHTML = '⛶';
-		enlargeBtn.className =
-			'absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded hover:bg-opacity-70 text-sm';
-
-		enlargeBtn.onclick = (e) => {
-			e.stopPropagation();
-			try { enlargeVideo(el); } catch {}
-		};
-
-		container.appendChild(enlargeBtn);
 
 		const audioMuteBadge = document.createElement('span');
 		audioMuteBadge.textContent = '\u{1F507}';
@@ -289,68 +271,4 @@ export function highlightSpeaking(containerEl, speaking) {
 		containerEl.style.outline = '';
 		containerEl.style.boxShadow = '';
 	}
-}
-
-/**
- * 指定された video 要素を全画面オーバーレイへ移動して拡大表示する
- *
- * 目的:
- * ・特定の参加者映像を一時的にフルスクリーンで確認できるようにする
- *
- * 副作用:
- * ・元の親要素・クラス・挿入位置を videoEl 自体に退避保存する
- * ・body 直下へ移動し、閉じるボタンを追加する
- */
-export function enlargeVideo(videoEl) {
-	if (!videoEl) return;
-
-	if (videoEl.__originalNextSibling) return;
-
-	videoEl.__originalClass = videoEl.className;
-	videoEl.__originalParent = videoEl.parentNode;
-	videoEl.__originalNextSibling = videoEl.nextSibling;
-
-	videoEl.className = 'fixed inset-0 w-screen h-screen object-contain bg-black z-50 cursor-pointer';
-	document.body.appendChild(videoEl);
-
-	const closeBtn = document.createElement('button');
-	closeBtn.innerHTML = '✕';
-	closeBtn.className =
-		'fixed top-4 right-4 z-50 bg-red-600 text-white p-3 rounded-full hover:bg-red-700 text-xl font-bold';
-
-	closeBtn.onclick = (e) => {
-		e.stopPropagation();
-		shrinkVideo(videoEl);
-	};
-
-	document.body.appendChild(closeBtn);
-	videoEl.__closeBtn = closeBtn;
-}
-
-/**
- * 拡大表示した video を元のコンテナへ戻す
- *
- * 副作用:
- * ・クラスと DOM の挿入位置を完全に元通りに復元する
- * ・拡大用の閉じるボタンを削除する
- */
-export function shrinkVideo(videoEl) {
-	if (!videoEl || !videoEl.__originalParent) return;
-
-	videoEl.className = videoEl.__originalClass;
-
-	if (videoEl.__originalNextSibling) {
-		videoEl.__originalParent.insertBefore(videoEl, videoEl.__originalNextSibling);
-	} else {
-		videoEl.__originalParent.appendChild(videoEl);
-	}
-
-	videoEl.onclick = null;
-
-	if (videoEl.__closeBtn) {
-		videoEl.__closeBtn.remove();
-		delete videoEl.__closeBtn;
-	}
-
-	delete videoEl.__originalNextSibling;
 }

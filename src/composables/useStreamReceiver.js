@@ -15,8 +15,6 @@ import {
   setRemoteAudioOutput,
   setRemoteParticipantVolume as setRemoteParticipantVolumeOnElement,
   setLocalAudioMuteBadgeVisible,
-  enlargeVideo as uiEnlarge,
-  shrinkVideo as uiShrink
 } from '../services/VideoUIService.js';
 import {
   buildSkywayMemberName,
@@ -59,7 +57,6 @@ export function useStreamReceiver() {
   const isBackgroundBlurred = ref(false);    // 背景ぼかしが有効かどうか
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
-  const enlargedVideo = ref(null);           // 現在拡大表示されている video 要素
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
   const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
   // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
@@ -75,12 +72,7 @@ export function useStreamReceiver() {
   const localSelfCameraPreviewStream = ref(null); // プレビュー専用のローカルカメラ stream。切替時の解放に使う
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
 
-  const handleLocalTileEnlarge = (videoEl) => {
-    try {
-      uiEnlarge(videoEl);
-      enlargedVideo.value = videoEl;
-    } catch {}
-  };
+  const handleLocalTileEnlarge = () => {};
 
   // 各 sub composable からの失敗を UI 表示用 state に集約する callback。
   const normalizeVolumePercent = (volumePercent) => {
@@ -512,33 +504,6 @@ export function useStreamReceiver() {
     isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
   };
 
-  // 映像を全画面表示する
-  /**
-   * 指定 video 要素を全画面オーバーレイ表示へ移す。
-   *
-   * @param {HTMLVideoElement} videoEl
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects DOM 再配置と enlargedVideo の更新を行う。
-   */
-  const enlargeVideo = (videoEl) => {
-    uiEnlarge(videoEl);
-    enlargedVideo.value = videoEl;
-  };
-
-  // 全画面表示を解除する
-  /**
-   * 全画面オーバーレイ表示を解除する。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects DOM 復元と enlargedVideo の初期化を行う。
-   */
-  const shrinkVideo = () => {
-    uiShrink(enlargedVideo.value);
-    enlargedVideo.value = null;
-  };
-
   // 初期化処理（デバイス取得・URL クエリ反映）
   onMounted(async () => {
     await loadMemberDisplayName();
@@ -580,7 +545,6 @@ export function useStreamReceiver() {
     isBackgroundBlurred,
     showShareOpen,
     showSettingsOpen,
-    enlargedVideo,
     videoInputDevices,
     audioInputDevices,
     audioOutputDevices,
@@ -615,7 +579,5 @@ export function useStreamReceiver() {
     confirmSpeakerPanel,
     getRemoteParticipantVolume,
     setRemoteParticipantVolume,
-    enlargeVideo,
-    shrinkVideo,
   };
 }

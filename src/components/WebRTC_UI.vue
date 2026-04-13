@@ -55,8 +55,6 @@ const {
   // パネルの表示トグル（URL 共有、設定など）: UI の開閉状態管理に使う
   showShareOpen,
   showSettingsOpen,
-  // 全画面表示中の video 要素参照。全画面化は DOM を body に移動させるため、この参照で状態管理する
-  enlargedVideo,
   // デバイスリストと選択状態（UI 側の選択肢表示と確定操作のために useStreamReceiver が提供）
   videoInputDevices,
   audioInputDevices,
@@ -94,9 +92,6 @@ const {
   confirmSpeakerPanel,
   getRemoteParticipantVolume,
   setRemoteParticipantVolume,
-  // 全画面化処理（DOM を移動するため UI が要素を渡す責務を持つ）。実際の DOM 操作は VideoUIService 側で行う
-  enlargeVideo,
-  shrinkVideo,
 } = useStreamReceiver();
 
 const selectedMainShareTile = computed(() => {
@@ -352,7 +347,6 @@ onBeforeRouteLeave(async () => {
 
 <template>
   <div class="p-4 space-y-4">
-    <div v-if="enlargedVideo" @click="shrinkVideo" class="fixed inset-0 bg-transparent z-40 cursor-pointer" />
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur px-3 py-2 shadow-sm">
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
