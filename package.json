@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@shiguredo/noise-suppression": "^2025.1.0",
     "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@skyway-sdk/room": "^1.15.1",
     "@skyway-sdk/token": "^2.0.1",

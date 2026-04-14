@@ -1,4 +1,5 @@
 import { nextTick } from 'vue';
+import { LocalAudioStream } from '@skyway-sdk/room';
 import {
   createContext,
   findOrCreateRoom,
@@ -266,16 +267,25 @@ export function useRoomSession({
       localVideoStream.value = videoStream;
 
       let audioConstraints = { audio: { deviceId: selectedAudioInputId.value || undefined } };
+      let audioStream = null;
       if (isRnnoiseEnabled.value) {
         rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
           onVad: (vadLevel) => {
             onLocalVadValue(localMember.value?.id || member?.id || '', vadLevel);
           },
         });
-        audioConstraints = rnnoiseHandle.constraints;
+        if (rnnoiseHandle?.processedTrack) {
+          audioStream = new LocalAudioStream(rnnoiseHandle.processedTrack, {
+            stopTrackWhenDisabled: true,
+          });
+        } else if (rnnoiseHandle?.constraints) {
+          audioConstraints = rnnoiseHandle.constraints;
+        }
       }
 
-      const audioStream = await createMicrophoneStream(audioConstraints);
+      if (!audioStream) {
+        audioStream = await createMicrophoneStream(audioConstraints);
+      }
       const publications = await publishLocal(member, {
         videoStream,
         audioStream
