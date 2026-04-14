@@ -266,7 +266,14 @@ export function useRoomSession({
       );
       localVideoStream.value = videoStream;
 
-      let audioConstraints = { audio: { deviceId: selectedAudioInputId.value || undefined } };
+      let audioConstraints = {
+        audio: {
+          deviceId: selectedAudioInputId.value || undefined,
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        }
+      };
       let audioStream = null;
       if (isRnnoiseEnabled.value) {
         rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
@@ -276,7 +283,7 @@ export function useRoomSession({
         });
         if (rnnoiseHandle?.processedTrack) {
           audioStream = new LocalAudioStream(rnnoiseHandle.processedTrack, {
-            stopTrackWhenDisabled: true,
+            stopTrackWhenDisabled: false,
           });
         } else if (rnnoiseHandle?.constraints) {
           audioConstraints = rnnoiseHandle.constraints;
