@@ -16,6 +16,8 @@ import {
   createCameraStream,
   createMicrophoneStream,
   enableBackgroundBlur,
+  releaseLocalStream,
+  updatePublishedAudioPublication,
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
 
@@ -83,6 +85,7 @@ const normalizeMemberJoinName = (memberJoinName) => {
  * @returns {{
  *   createRoom: () => Promise<void>,
  *   joinRoom: () => Promise<void>,
+ *   replaceLocalAudioForRnnoiseToggle: () => Promise<void>,
  *   leaveRoom: () => Promise<void>,
  * }}
  * @throws {never}
@@ -138,8 +141,10 @@ export function useRoomSession({
   let publicationEnabledHandler = null;
   // onPublicationDisabled の購読解除に使う handler 参照。remote audio badge 同期の解除に使う。
   let publicationDisabledHandler = null;
-  // join 中に作成した RNNoise ハンドル。leave 時の cleanup でのみ参照する。
+  // join 中に作成した RNNoise ハンドル。live toggle と leave 時の cleanup に使う。
   let rnnoiseHandle = null;
+  // 現在 publish 中の local audio stream。差し替え時と leave 時の解放に使う。
+  let localAudioStream = null;
 
   // join 後に既存 mute state を publication へ再反映し、UI と publish state の不一致を防ぐ。
   const reflectInitialMuteState = async () => {
@@ -149,6 +154,49 @@ export function useRoomSession({
     try {
       if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
     } catch {}
+  };
+
+  const cleanupRnnoiseHandle = (handle) => {
+    try {
+      handle?.cleanup?.();
+    } catch {}
+  };
+
+  const createLocalAudioStream = async (memberIdForVad = '') => {
+    let audioConstraints = {
+      audio: {
+        deviceId: selectedAudioInputId.value || undefined,
+        noiseSuppression: true,
+        echoCancellation: true,
+        autoGainControl: true,
+      }
+    };
+    let audioStream = null;
+    let nextRnnoiseHandle = null;
+
+    if (isRnnoiseEnabled.value) {
+      nextRnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
+        onVad: (vadLevel) => {
+          onLocalVadValue(memberIdForVad, vadLevel);
+        },
+      });
+      if (nextRnnoiseHandle?.processedTrack) {
+        audioStream = new LocalAudioStream(nextRnnoiseHandle.processedTrack, {
+          stopTrackWhenDisabled: false,
+        });
+      } else if (nextRnnoiseHandle?.constraints) {
+        audioConstraints = nextRnnoiseHandle.constraints;
+      }
+    }
+
+    if (!audioStream) {
+      audioStream = await createMicrophoneStream(audioConstraints);
+    }
+
+    return {
+      audioStream,
+      nextRnnoiseHandle,
+    };
   };
 
   // room event handler の bind 状態を join/leave 境界で揃えるため、登録済み handler を一括解除する。
@@ -266,33 +314,11 @@ export function useRoomSession({
       );
       localVideoStream.value = videoStream;
 
-      let audioConstraints = {
-        audio: {
-          deviceId: selectedAudioInputId.value || undefined,
-          noiseSuppression: true,
-          echoCancellation: true,
-          autoGainControl: true,
-        }
-      };
-      let audioStream = null;
-      if (isRnnoiseEnabled.value) {
-        rnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
-          onVad: (vadLevel) => {
-            onLocalVadValue(localMember.value?.id || member?.id || '', vadLevel);
-          },
-        });
-        if (rnnoiseHandle?.processedTrack) {
-          audioStream = new LocalAudioStream(rnnoiseHandle.processedTrack, {
-            stopTrackWhenDisabled: false,
-          });
-        } else if (rnnoiseHandle?.constraints) {
-          audioConstraints = rnnoiseHandle.constraints;
-        }
-      }
+      const createdAudio = await createLocalAudioStream(localMember.value?.id || member?.id || '');
+      const audioStream = createdAudio.audioStream;
+      rnnoiseHandle = createdAudio.nextRnnoiseHandle;
+      localAudioStream = audioStream;
 
-      if (!audioStream) {
-        audioStream = await createMicrophoneStream(audioConstraints);
-      }
       const publications = await publishLocal(member, {
         videoStream,
         audioStream
@@ -338,6 +364,49 @@ export function useRoomSession({
     }
   };
 
+  // joined 中に RNNoise ON/OFF が切り替わった場合だけ local audio publication を即時差し替える。
+  const replaceLocalAudioForRnnoiseToggle = async () => {
+    if (!joined.value || !localMember.value) return;
+
+    const prevAudioStream = localAudioStream;
+    const prevRnnoiseHandle = rnnoiseHandle;
+    let nextAudioStream = null;
+    let nextRnnoiseHandle = null;
+
+    try {
+      const createdAudio = await createLocalAudioStream(localMember.value?.id || '');
+      nextAudioStream = createdAudio.audioStream;
+      nextRnnoiseHandle = createdAudio.nextRnnoiseHandle;
+
+      const nextAudioPublication = await updatePublishedAudioPublication({
+        member: localMember.value,
+        currentPublication: localAudioPublication.value,
+        nextStream: nextAudioStream,
+      });
+
+      localAudioPublication.value = nextAudioPublication;
+      localAudioStream = nextAudioStream;
+      rnnoiseHandle = nextRnnoiseHandle;
+
+      try {
+        if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
+      } catch {}
+    } catch (error) {
+      releaseLocalStream(nextAudioStream);
+      cleanupRnnoiseHandle(nextRnnoiseHandle);
+      throw error;
+    }
+
+    releaseLocalStream(prevAudioStream);
+    cleanupRnnoiseHandle(prevRnnoiseHandle);
+
+    try {
+      onJoinCompleted(localMember.value?.id || '', nextAudioStream);
+    } catch (error) {
+      console.warn('onJoinCompleted failed after audio publication replace:', error);
+    }
+  };
+
   // room 退出時に event unbind、media/preview cleanup、join 関連 state reset を順序どおりに実行する。
   const leaveRoom = async () => {
     if (!joined.value || leaving.value) return;
@@ -363,9 +432,10 @@ export function useRoomSession({
       } catch {}
       setBlurProcessor(null);
 
-      try {
-        rnnoiseHandle?.cleanup?.();
-      } catch {}
+      releaseLocalStream(localAudioStream);
+      localAudioStream = null;
+
+      cleanupRnnoiseHandle(rnnoiseHandle);
       rnnoiseHandle = null;
 
       joined.value = false;
@@ -388,6 +458,7 @@ export function useRoomSession({
   return {
     createRoom,
     joinRoom,
+    replaceLocalAudioForRnnoiseToggle,
     leaveRoom,
   };
 }

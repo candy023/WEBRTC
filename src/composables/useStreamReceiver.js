@@ -295,6 +295,8 @@ export function useStreamReceiver() {
     createRoom,
     // room 参加、publish、subscribeExisting、event bind を順序どおりに実行する handler。
     joinRoom,
+    // joined 中の RNNoise ON/OFF 変更時に local audio publication を差し替える handler。
+    replaceLocalAudioForRnnoiseToggle,
     // room 退出、event unbind、join 関連 state cleanup を行う handler。
     leaveRoom,
   } = useRoomSession({
@@ -465,7 +467,17 @@ export function useStreamReceiver() {
    * @sideeffects isRnnoiseEnabled を更新する。
    */
   const toggleRnnoise = async () => {
-    isRnnoiseEnabled.value = !isRnnoiseEnabled.value;
+    const prevRnnoiseEnabled = isRnnoiseEnabled.value;
+    isRnnoiseEnabled.value = !prevRnnoiseEnabled;
+
+    if (!joined.value) return;
+
+    try {
+      await replaceLocalAudioForRnnoiseToggle();
+    } catch (e) {
+      isRnnoiseEnabled.value = prevRnnoiseEnabled;
+      errorMessage.value = e?.message || String(e);
+    }
   };
 
   // 映像を全画面表示する

@@ -227,3 +227,29 @@ export async function updatePublishedVideoPublication({ member, currentPublicati
 
   return member.publish(nextStream);
 }
+
+/**
+ * 音声 publication を現在の SDK 仕様に沿って更新する。
+ * local publication に replaceStream が使える場合はそれを優先し、
+ * publish を取り下げるケースでは unpublish にフォールバックする。
+ */
+export async function updatePublishedAudioPublication({ member, currentPublication, nextStream }) {
+  if (!member) {
+    throw new Error('Local member is not available.');
+  }
+
+  if (currentPublication && nextStream && typeof currentPublication.replaceStream === 'function') {
+    currentPublication.replaceStream(nextStream);
+    return currentPublication;
+  }
+
+  if (currentPublication) {
+    await member.unpublish(currentPublication);
+  }
+
+  if (!nextStream) {
+    return null;
+  }
+
+  return member.publish(nextStream);
+}
