@@ -1,18 +1,112 @@
 // RnnoiseService.js
 // 責務:
 // ・選択中のマイクから元の audio track を取得する
-// ・@shiguredo/noise-suppression で処理済み track を生成する
+// ・DataDog/dtln-rs の AudioWorklet で処理済み track を生成する
 // ・publish 側で使うための fallback 情報と cleanup を返す
 // ※ファイル名は既存 import 互換のため維持する
 
-import { NoiseSuppressionProcessor } from '@shiguredo/noise-suppression';
+const DTLN_WORKLET_MODULE_PATH = '/dtln-worklet.js';
+const DTLN_SAMPLE_RATE = 16000;
+const DTLN_READY_TIMEOUT_MS = 5000;
 
-/**
- * 公式 dist 配布物の取得先。
- * まずは最小差分を優先し、CDN 版を使う。
- */
-const NOISE_SUPPRESSION_ASSETS_PATH =
-	'https://cdn.jsdelivr.net/npm/@shiguredo/noise-suppression@latest/dist';
+const createDtlnAudioConstraints = (audioDeviceId) => ({
+	noiseSuppression: false,
+	echoCancellation: false,
+	autoGainControl: false,
+	channelCount: 1,
+	sampleRate: DTLN_SAMPLE_RATE,
+	...(audioDeviceId ? { deviceId: audioDeviceId } : {})
+});
+
+const createNoneAudioConstraints = (audioDeviceId) => ({
+	noiseSuppression: true,
+	echoCancellation: true,
+	autoGainControl: true,
+	...(audioDeviceId ? { deviceId: audioDeviceId } : {})
+});
+
+const createFallbackResult = (constraints) => ({
+	constraints,
+	originalTrack: null,
+	processedTrack: null,
+	denoisedTrack: null,
+	processor: null,
+	cleanup: () => {},
+	isActive: false
+});
+
+const isDtlnAudioWorkletSupported = () => {
+	const AudioContextCtor =
+		(typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
+		|| null;
+
+	return !!(
+		AudioContextCtor
+		&& typeof AudioWorkletNode !== 'undefined'
+		&& typeof navigator !== 'undefined'
+		&& navigator.mediaDevices
+		&& typeof navigator.mediaDevices.getUserMedia === 'function'
+	);
+};
+
+const waitForDtlnReady = (workletNode, timeoutMs = DTLN_READY_TIMEOUT_MS) => (
+	new Promise((resolve) => {
+		let finished = false;
+		let timer = null;
+
+		const cleanup = () => {
+			if (timer) {
+				clearTimeout(timer);
+				timer = null;
+			}
+
+			try {
+				if (typeof workletNode?.port?.removeEventListener === 'function') {
+					workletNode.port.removeEventListener('message', onMessage);
+				}
+			} catch {}
+
+			try {
+				if (workletNode?.port) {
+					workletNode.port.onmessage = null;
+				}
+			} catch {}
+		};
+
+		const finish = (ready) => {
+			if (finished) return;
+			finished = true;
+			cleanup();
+			resolve(ready);
+		};
+
+		const onMessage = (event) => {
+			if (event?.data === 'ready') {
+				finish(true);
+			}
+		};
+
+		timer = setTimeout(() => {
+			finish(false);
+		}, timeoutMs);
+
+		try {
+			if (typeof workletNode?.port?.addEventListener === 'function') {
+				workletNode.port.addEventListener('message', onMessage);
+				workletNode.port.start?.();
+			} else if (workletNode?.port) {
+				workletNode.port.onmessage = onMessage;
+			}
+		} catch {
+			finish(false);
+			return;
+		}
+
+		try {
+			workletNode?.port?.postMessage?.({ type: 'ping-ready' });
+		} catch {}
+	})
+);
 
 /**
  * ノイズ抑制を初期化し、処理済み track と fallback 用 constraints を返す。
@@ -25,106 +119,49 @@ const NOISE_SUPPRESSION_ASSETS_PATH =
  *   originalTrack: MediaStreamTrack | null,
  *   processedTrack: MediaStreamTrack | null,
  *   denoisedTrack: MediaStreamTrack | null,
- *   processor: NoiseSuppressionProcessor | null,
+ *   processor: AudioWorkletNode | null,
+ *   audioContext?: AudioContext | null,
  *   cleanup: () => void,
  *   isActive: boolean,
  * }>}
  * @throws {never}
- * @sideeffects マイクストリーム取得、NoiseSuppressionProcessor の初期化、処理済み track 生成を行う。
+ * @sideeffects マイクストリーム取得、AudioWorklet の初期化、処理済み track 生成を行う。
  */
 export async function setupRnnoise(audioDeviceId, options = {}) {
 	// 既存 API 互換のため受け取る。現実装では未使用。
 	const { onVad = () => {} } = options;
 	void onVad;
 
-	// ノイズ抑制処理との二重適用を避けるため、browser 標準の noiseSuppression は無効化する。
-	// echoCancellation と autoGainControl は通話用途として維持する。
-	const audioConstraints = {
-		noiseSuppression: false,
-		echoCancellation: true,
-		autoGainControl: true,
-		...(audioDeviceId ? { deviceId: audioDeviceId } : {})
-	};
+	const dtlnAudioConstraints = createDtlnAudioConstraints(audioDeviceId);
+	const noneAudioConstraints = createNoneAudioConstraints(audioDeviceId);
 
-	// ノイズ抑制が使えない場合でも、呼び出し側が通常マイク publish へ戻れるように返す。
-	const constraints = { audio: audioConstraints };
-	const fallbackResult = {
-		constraints,
-		originalTrack: null,
-		processedTrack: null,
-		denoisedTrack: null,
-		processor: null,
-		cleanup: () => {},
-		isActive: false
-	};
+	const constraints = { audio: dtlnAudioConstraints };
+	const fallbackResult = createFallbackResult({ audio: noneAudioConstraints });
 
 	// cleanup と catch で安全に止めるため、生成した資源を外側で保持する。
 	let rawStream = null;
 	let originalTrack = null;
 	let processedTrack = null;
-	let processor = null;
+	let audioContext = null;
+	let sourceNode = null;
+	let workletNode = null;
+	let destinationNode = null;
 
-	try {
-		if (
-			typeof NoiseSuppressionProcessor?.isSupported === 'function'
-			&& !NoiseSuppressionProcessor.isSupported()
-		) {
-			return fallbackResult;
-		}
-
-		rawStream = await navigator.mediaDevices.getUserMedia(constraints);
-		originalTrack = rawStream.getAudioTracks()[0] || null;
-
-		if (!originalTrack) {
-			try {
-				rawStream.getTracks().forEach((track) => track.stop());
-			} catch {}
-			return fallbackResult;
-		}
-
-		processor = new NoiseSuppressionProcessor(NOISE_SUPPRESSION_ASSETS_PATH);
-		processedTrack = await processor.startProcessing(originalTrack);
-
-		let active = !!processedTrack;
-		let cleaned = false;
-
-		const cleanup = () => {
-			if (cleaned) return;
-			cleaned = true;
-
-			try {
-				processor?.stopProcessing?.();
-			} catch {}
-
-			try {
-				processedTrack?.stop?.();
-			} catch {}
-
-			try {
-				rawStream?.getTracks?.().forEach((track) => track.stop());
-			} catch {}
-
-			active = false;
-		};
-
-		return {
-			constraints,
-			originalTrack,
-			processedTrack: processedTrack || null,
-			// 既存の denoisedTrack 参照が残っていても壊れないように互換キーを残す。
-			denoisedTrack: processedTrack || null,
-			processor,
-			cleanup,
-			get isActive() {
-				return active;
-			}
-		};
-
-	} catch (e) {
-		console.warn('RNNoise 初期化失敗:', e);
+	const releaseCreatedResources = () => {
+		try {
+			workletNode?.port?.postMessage?.({ type: 'shutdown' });
+		} catch {}
 
 		try {
-			processor?.stopProcessing?.();
+			sourceNode?.disconnect?.();
+		} catch {}
+
+		try {
+			workletNode?.disconnect?.();
+		} catch {}
+
+		try {
+			destinationNode?.disconnect?.();
 		} catch {}
 
 		try {
@@ -134,6 +171,95 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 		try {
 			rawStream?.getTracks?.().forEach((track) => track.stop());
 		} catch {}
+
+		try {
+			audioContext?.close?.();
+		} catch {}
+	};
+
+	try {
+		if (!isDtlnAudioWorkletSupported()) {
+			return fallbackResult;
+		}
+
+		rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+		originalTrack = rawStream.getAudioTracks()[0] || null;
+
+		if (!originalTrack) {
+			releaseCreatedResources();
+			return fallbackResult;
+		}
+
+		const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+		audioContext = new AudioContextCtor({
+			sampleRate: DTLN_SAMPLE_RATE,
+			latencyHint: 'interactive'
+		});
+
+		await audioContext.audioWorklet.addModule(DTLN_WORKLET_MODULE_PATH);
+
+		workletNode = new AudioWorkletNode(audioContext, 'NoiseSuppressionWorker', {
+			channelCount: 1,
+			channelCountMode: 'explicit',
+			channelInterpretation: 'speakers',
+			numberOfInputs: 1,
+			numberOfOutputs: 1,
+			outputChannelCount: [1],
+			processorOptions: {
+				disableMetrics: true
+			}
+		});
+
+		sourceNode = audioContext.createMediaStreamSource(rawStream);
+		destinationNode = audioContext.createMediaStreamDestination();
+
+		sourceNode.connect(workletNode);
+		workletNode.connect(destinationNode);
+
+		if (audioContext.state === 'suspended') {
+			await audioContext.resume();
+		}
+
+		const isReady = await waitForDtlnReady(workletNode, DTLN_READY_TIMEOUT_MS);
+		if (!isReady) {
+			releaseCreatedResources();
+			return fallbackResult;
+		}
+
+		processedTrack = destinationNode.stream.getAudioTracks()[0] || null;
+		if (!processedTrack || processedTrack.readyState === 'ended') {
+			releaseCreatedResources();
+			return fallbackResult;
+		}
+
+		let active = !!processedTrack;
+		let cleaned = false;
+
+		const cleanup = () => {
+			if (cleaned) return;
+			cleaned = true;
+
+			releaseCreatedResources();
+			active = false;
+		};
+
+		return {
+			constraints,
+			originalTrack,
+			processedTrack: processedTrack || null,
+			// 既存の denoisedTrack 参照が残っていても壊れないように互換キーを残す。
+			denoisedTrack: processedTrack || null,
+			processor: workletNode || null,
+			audioContext: audioContext || null,
+			cleanup,
+			get isActive() {
+				return active;
+			}
+		};
+
+	} catch (e) {
+		console.warn('DTLN 初期化失敗:', e);
+		releaseCreatedResources();
 
 		return fallbackResult;
 	}
