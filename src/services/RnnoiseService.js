@@ -81,8 +81,13 @@ const waitForDtlnReady = (workletNode, timeoutMs = DTLN_READY_TIMEOUT_MS) => (
 		};
 
 		const onMessage = (event) => {
-			if (event?.data === 'ready') {
+			const data = event?.data;
+			if (data === 'ready') {
 				finish(true);
+				return;
+			}
+			if (data?.type === 'error') {
+				finish(false);
 			}
 		};
 

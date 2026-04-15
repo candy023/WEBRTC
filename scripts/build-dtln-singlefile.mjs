@@ -19,6 +19,11 @@ const createPreamble = (base64) => `${PREAMBLE_BEGIN}
 var Module = globalThis.Module || {};
 (() => {
   const embeddedWasmBase64 = '${base64}';
+  const shouldUseEmbeddedWasm = () => (
+    typeof fetch !== 'function'
+    && typeof XMLHttpRequest !== 'function'
+    && typeof importScripts !== 'function'
+  );
   const decodeEmbeddedBase64 = (input) => {
     const table = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
     const cleaned = input.replace(/\\s+/g, '').replace(/=+$/, '');
@@ -42,7 +47,13 @@ var Module = globalThis.Module || {};
     return offset === out.length ? out : out.subarray(0, offset);
   };
 
-  Module.wasmBinary = decodeEmbeddedBase64(embeddedWasmBase64);
+  if (shouldUseEmbeddedWasm()) {
+    Module.wasmBinary = decodeEmbeddedBase64(embeddedWasmBase64);
+  } else {
+    try {
+      delete Module.wasmBinary;
+    } catch {}
+  }
   Module.wasmBinaryFile = '/dtln_rs.wasm';
   globalThis.Module = Module;
 })();
