@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:dtln:singlefile": "node scripts/build-dtln-singlefile.mjs"
   },
   "dependencies": {
     "@shiguredo/noise-suppression": "^2025.1.0",
