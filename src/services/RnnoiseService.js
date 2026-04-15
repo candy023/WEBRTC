@@ -8,7 +8,7 @@
 const DTLN_WORKLET_MODULE_PATH = '/dtln-worklet.js';
 const DTLN_SAMPLE_RATE = 16000;
 const DTLN_READY_TIMEOUT_MS = 5000;
-const DTLN_OUTPUT_GAIN = 1.5;
+const DTLN_OUTPUT_GAIN = 6.0;
 
 const createDtlnAudioConstraints = (audioDeviceId) => ({
 	noiseSuppression: false,
