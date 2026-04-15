@@ -1,6 +1,12 @@
-import '/dtln.js';
-
+const DTLN_SCRIPT_PATH = '/dtln.js';
+const DTLN_WASM_PATH = '/dtln_rs.wasm';
 const DTLN_FIXED_BUFFER_SIZE = 512;
+const createWorkletEnvSnapshot = () => ({
+  fetchType: typeof fetch,
+  xmlHttpRequestType: typeof XMLHttpRequest,
+  importScriptsType: typeof importScripts,
+  windowType: typeof window,
+});
 
 class NoiseSuppressionWorker extends AudioWorkletProcessor {
   constructor(options) {
@@ -15,6 +21,7 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     this.inputIndex = 0;
     this.outputSamples = 0;
     this.disableMetrics = !!options?.processorOptions?.disableMetrics;
+    this.moduleInitPromise = null;
 
     this.port.onmessage = (event) => {
       const data = event?.data;
@@ -29,13 +36,111 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       }
     };
 
-    this.tryActivateModule();
+    const envSnapshot = createWorkletEnvSnapshot();
+    this.postDiagnostic({
+      type: 'dtln-worklet-env',
+      ...envSnapshot,
+    });
+    try {
+      console.info('[dtln-worklet] env', envSnapshot);
+    } catch {}
 
-    if (!this.isModuleReady && typeof DtlnPlugin !== 'undefined') {
-      DtlnPlugin.postRun = [() => {
-        this.tryActivateModule();
-      }];
+    if (!this.tryActivateModule()) {
+      this.startModuleInitialization();
     }
+  }
+
+  postDiagnostic(payload) {
+    try {
+      this.port.postMessage(payload);
+    } catch {}
+  }
+
+  applyWindowShimForModuleImport() {
+    if (typeof window !== 'undefined') {
+      return {
+        applied: false,
+        restore: () => {},
+      };
+    }
+
+    let shimApplied = false;
+    try {
+      globalThis.window = globalThis;
+      shimApplied = true;
+    } catch {}
+
+    return {
+      applied: shimApplied,
+      restore: () => {
+        if (!shimApplied) return;
+        try {
+          delete globalThis.window;
+        } catch {}
+      },
+    };
+  }
+
+  configureModuleOverrides() {
+    const moduleRef = (typeof globalThis.Module === 'object' && globalThis.Module)
+      ? globalThis.Module
+      : {};
+    const previousLocateFile = moduleRef.locateFile;
+
+    moduleRef.locateFile = (path, scriptDirectory) => {
+      if (typeof path === 'string' && path.endsWith('.wasm')) {
+        return DTLN_WASM_PATH;
+      }
+
+      if (typeof previousLocateFile === 'function') {
+        return previousLocateFile(path, scriptDirectory);
+      }
+
+      return path;
+    };
+
+    globalThis.Module = moduleRef;
+  }
+
+  attachDtlnPostRunHook() {
+    const plugin = globalThis.DtlnPlugin;
+    if (!plugin) return;
+    plugin.postRun = [() => {
+      this.tryActivateModule();
+    }];
+  }
+
+  startModuleInitialization() {
+    if (this.moduleInitPromise) return;
+
+    const { applied: windowShimApplied, restore: restoreWindowShim } = this.applyWindowShimForModuleImport();
+    this.configureModuleOverrides();
+    this.postDiagnostic({
+      type: 'dtln-module-bootstrap',
+      windowShimApplied,
+      locateFileConfigured: typeof globalThis.Module?.locateFile === 'function',
+      wasmBinaryConfigured: !!globalThis.Module?.wasmBinary,
+    });
+
+    this.moduleInitPromise = import(DTLN_SCRIPT_PATH)
+      .then(() => {
+        this.attachDtlnPostRunHook();
+        this.tryActivateModule();
+      })
+      .catch((error) => {
+        this.postDiagnostic({
+          type: 'error',
+          stage: 'module-import',
+          message: error?.message || String(error),
+        });
+      })
+      .finally(() => {
+        restoreWindowShim();
+        this.postDiagnostic({
+          type: 'dtln-window-shim-restored',
+          windowTypeAfterRestore: typeof window,
+        });
+      });
   }
 
   notifyReady() {
@@ -50,11 +155,12 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   tryActivateModule() {
     if (this.isModuleReady) return true;
 
+    const moduleRef = globalThis.Module;
     if (
-      typeof Module !== 'undefined'
-      && typeof Module._dtln_create_wasm === 'function'
-      && typeof Module._dtln_denoise_wasm === 'function'
-      && typeof Module.HEAPF32 !== 'undefined'
+      moduleRef
+      && typeof moduleRef._dtln_create_wasm === 'function'
+      && typeof moduleRef._dtln_denoise_wasm === 'function'
+      && typeof moduleRef.HEAPF32 !== 'undefined'
     ) {
       this.isModuleReady = true;
       this.notifyReady();
@@ -67,10 +173,11 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   dispose() {
     if (this.isDisposed) return;
     this.isDisposed = true;
+    const plugin = globalThis.DtlnPlugin;
 
     try {
-      if (this.dtlnHandle !== null && this.dtlnHandle !== undefined) {
-        DtlnPlugin.dtln_destroy(this.dtlnHandle);
+      if (plugin && this.dtlnHandle !== null && this.dtlnHandle !== undefined) {
+        plugin.dtln_destroy(this.dtlnHandle);
       }
     } catch {}
 
@@ -104,22 +211,29 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
 
     const input = inputs[0][0];
     const output = outputs[0][0];
+    const plugin = globalThis.DtlnPlugin;
 
     if (!this.tryActivateModule()) {
+      this.startModuleInitialization();
       output.fill(0);
       return true;
     }
 
     try {
+      if (!plugin) {
+        output.fill(0);
+        return true;
+      }
+
       if (this.dtlnHandle === null || this.dtlnHandle === undefined) {
-        this.dtlnHandle = DtlnPlugin.dtln_create();
+        this.dtlnHandle = plugin.dtln_create();
       }
 
       this.inputBuffer.set(input, this.inputIndex);
       this.inputIndex += input.length;
 
       if (this.inputIndex >= DTLN_FIXED_BUFFER_SIZE) {
-        DtlnPlugin.dtln_denoise(this.dtlnHandle, this.inputBuffer, this.outputBuffer);
+        plugin.dtln_denoise(this.dtlnHandle, this.inputBuffer, this.outputBuffer);
         this.inputIndex = 0;
         this.outputSamples = DTLN_FIXED_BUFFER_SIZE;
       }
