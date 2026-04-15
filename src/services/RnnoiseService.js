@@ -184,6 +184,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 
 	try {
 		if (!isDtlnAudioWorkletSupported()) {
+			console.warn('[dtln-audio] setupRnnoise: AudioWorklet unsupported, fallback to microphone path');
 			return fallbackResult;
 		}
 
@@ -191,6 +192,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 		originalTrack = rawStream.getAudioTracks()[0] || null;
 
 		if (!originalTrack) {
+			console.warn('[dtln-audio] setupRnnoise: getUserMedia succeeded but originalTrack is missing, fallback to microphone path');
 			releaseCreatedResources();
 			return fallbackResult;
 		}
@@ -201,7 +203,13 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 			latencyHint: 'interactive'
 		});
 
-		await audioContext.audioWorklet.addModule(DTLN_WORKLET_MODULE_PATH);
+		try {
+			await audioContext.audioWorklet.addModule(DTLN_WORKLET_MODULE_PATH);
+		} catch (error) {
+			console.warn('[dtln-audio] setupRnnoise: addModule failed, fallback to microphone path', error);
+			releaseCreatedResources();
+			return fallbackResult;
+		}
 
 		workletNode = new AudioWorkletNode(audioContext, 'NoiseSuppressionWorker', {
 			channelCount: 1,
@@ -227,15 +235,21 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 
 		const isReady = await waitForDtlnReady(workletNode, DTLN_READY_TIMEOUT_MS);
 		if (!isReady) {
+			console.warn('[dtln-audio] setupRnnoise: waitForDtlnReady returned false (timeout or not ready), fallback to microphone path');
 			releaseCreatedResources();
 			return fallbackResult;
 		}
 
 		processedTrack = destinationNode.stream.getAudioTracks()[0] || null;
 		if (!processedTrack || processedTrack.readyState === 'ended') {
+			console.warn('[dtln-audio] setupRnnoise: processedTrack missing or ended, fallback to microphone path', {
+				hasProcessedTrack: !!processedTrack,
+				readyState: processedTrack?.readyState || 'missing',
+			});
 			releaseCreatedResources();
 			return fallbackResult;
 		}
+		console.info('[dtln-audio] setupRnnoise: processedTrack ready, using dtln path');
 
 		let active = !!processedTrack;
 		let cleaned = false;
