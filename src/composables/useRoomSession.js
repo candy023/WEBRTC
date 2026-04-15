@@ -184,12 +184,14 @@ export function useRoomSession({
         audioStream = new LocalAudioStream(nextRnnoiseHandle.processedTrack, {
           stopTrackWhenDisabled: false,
         });
+        console.info('[dtln-audio] join/createLocalAudioStream: using processedTrack publish path');
       } else if (nextRnnoiseHandle?.constraints) {
         audioConstraints = nextRnnoiseHandle.constraints;
       }
     }
 
     if (!audioStream) {
+      console.info('[dtln-audio] join/createLocalAudioStream: using microphone fallback path');
       audioStream = await createMicrophoneStream(audioConstraints);
     }
 
@@ -387,6 +389,7 @@ export function useRoomSession({
       localAudioPublication.value = nextAudioPublication;
       localAudioStream = nextAudioStream;
       rnnoiseHandle = nextRnnoiseHandle;
+      console.info('[dtln-audio] replaceLocalAudioForRnnoiseToggle: audio publication replaced');
 
       try {
         if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
