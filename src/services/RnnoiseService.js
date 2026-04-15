@@ -8,6 +8,7 @@
 const DTLN_WORKLET_MODULE_PATH = '/dtln-worklet.js';
 const DTLN_SAMPLE_RATE = 16000;
 const DTLN_READY_TIMEOUT_MS = 5000;
+const DTLN_OUTPUT_GAIN = 1.5;
 
 const createDtlnAudioConstraints = (audioDeviceId) => ({
 	noiseSuppression: false,
@@ -150,6 +151,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 	let audioContext = null;
 	let sourceNode = null;
 	let workletNode = null;
+	let gainNode = null;
 	let destinationNode = null;
 
 	const releaseCreatedResources = () => {
@@ -163,6 +165,10 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 
 		try {
 			workletNode?.disconnect?.();
+		} catch {}
+
+		try {
+			gainNode?.disconnect?.();
 		} catch {}
 
 		try {
@@ -224,10 +230,13 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 		});
 
 		sourceNode = audioContext.createMediaStreamSource(rawStream);
+		gainNode = audioContext.createGain();
+		gainNode.gain.value = DTLN_OUTPUT_GAIN;
 		destinationNode = audioContext.createMediaStreamDestination();
 
 		sourceNode.connect(workletNode);
-		workletNode.connect(destinationNode);
+		workletNode.connect(gainNode);
+		gainNode.connect(destinationNode);
 
 		if (audioContext.state === 'suspended') {
 			await audioContext.resume();
