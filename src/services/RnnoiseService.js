@@ -13,7 +13,7 @@ const DTLN_OUTPUT_GAIN = 15.0;
 const createDtlnAudioConstraints = (audioDeviceId) => ({
 	noiseSuppression: false,
 	echoCancellation: false,
-	autoGainControl: false,
+	autoGainControl: true,
 	channelCount: 1,
 	sampleRate: DTLN_SAMPLE_RATE,
 	...(audioDeviceId ? { deviceId: audioDeviceId } : {})
