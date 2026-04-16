@@ -36,6 +36,44 @@ const createFallbackResult = (constraints) => ({
 	isActive: false
 });
 
+const createTrackProfile = (track) => {
+	if (!track) return null;
+
+	let settings = null;
+	let constraints = null;
+
+	try {
+		settings = track.getSettings?.() || null;
+	} catch {}
+
+	try {
+		constraints = track.getConstraints?.() || null;
+	} catch {}
+
+	return {
+		id: track.id || null,
+		label: track.label || '',
+		enabled: !!track.enabled,
+		muted: !!track.muted,
+		readyState: track.readyState || 'unknown',
+		settings,
+		constraints,
+	};
+};
+
+const createWorkletDiagnosticLogger = () => (event) => {
+	const data = event?.data;
+	if (!data || typeof data !== 'object') return;
+
+	if (
+		data.type === 'dtln-worklet-env'
+		|| data.type === 'dtln-bypass-enabled'
+		|| data.type === 'dtln-levels'
+	) {
+		console.info('[dtln-audio] worklet diagnostic', data);
+	}
+};
+
 const isDtlnAudioWorkletSupported = () => {
 	const AudioContextCtor =
 		(typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
@@ -153,8 +191,16 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 	let workletNode = null;
 	let gainNode = null;
 	let destinationNode = null;
+	let workletDiagnosticLogger = null;
 
 	const releaseCreatedResources = () => {
+		try {
+			if (workletDiagnosticLogger && typeof workletNode?.port?.removeEventListener === 'function') {
+				workletNode.port.removeEventListener('message', workletDiagnosticLogger);
+			}
+		} catch {}
+		workletDiagnosticLogger = null;
+
 		try {
 			workletNode?.port?.postMessage?.({ type: 'shutdown' });
 		} catch {}
@@ -202,11 +248,18 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 			releaseCreatedResources();
 			return fallbackResult;
 		}
+		console.info('[dtln-audio] setupRnnoise: raw track profile', createTrackProfile(originalTrack));
 
 		const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 		audioContext = new AudioContextCtor({
 			sampleRate: DTLN_SAMPLE_RATE,
 			latencyHint: 'interactive'
+		});
+		console.info('[dtln-audio] setupRnnoise: audio context profile', {
+			sampleRate: audioContext.sampleRate,
+			state: audioContext.state,
+			baseLatency: audioContext.baseLatency,
+			outputLatency: audioContext.outputLatency,
 		});
 
 		try {
@@ -248,6 +301,13 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 			releaseCreatedResources();
 			return fallbackResult;
 		}
+		workletDiagnosticLogger = createWorkletDiagnosticLogger();
+		try {
+			if (typeof workletNode?.port?.addEventListener === 'function') {
+				workletNode.port.addEventListener('message', workletDiagnosticLogger);
+				workletNode.port.start?.();
+			}
+		} catch {}
 
 		processedTrack = destinationNode.stream.getAudioTracks()[0] || null;
 		if (!processedTrack || processedTrack.readyState === 'ended') {
@@ -259,6 +319,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 			return fallbackResult;
 		}
 		console.info('[dtln-audio] setupRnnoise: processedTrack ready, using dtln path');
+		console.info('[dtln-audio] setupRnnoise: processed track profile', createTrackProfile(processedTrack));
 
 		let active = !!processedTrack;
 		let cleaned = false;
