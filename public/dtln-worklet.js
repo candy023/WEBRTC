@@ -1,6 +1,13 @@
 import '/dtln.js';
 const DTLN_WASM_PATH = '/dtln_rs.wasm';
 const DTLN_FIXED_BUFFER_SIZE = 512;
+const DTLN_BYPASS_MODE = false;
+const DTLN_DIAGNOSTICS_ENABLED = true;
+const DTLN_DIAGNOSTIC_FIRST_FRAMES = 8;
+const DTLN_DIAGNOSTIC_INTERVAL_FRAMES = 64;
+const DTLN_OUTPUT_MINMAX_HISTORY_SIZE = 6;
+const DTLN_NEAR_ZERO_RMS_THRESHOLD = 1e-4;
+const DTLN_NEAR_ZERO_PEAK_THRESHOLD = 5e-4;
 const createWorkletEnvSnapshot = () => ({
   fetchType: typeof fetch,
   xmlHttpRequestType: typeof XMLHttpRequest,
@@ -22,6 +29,9 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     this.outputSamples = 0;
     this.disableMetrics = !!options?.processorOptions?.disableMetrics;
     this.moduleInitPromise = null;
+    this.processFrameCount = 0;
+    this.outputMinMaxHistory = [];
+    this.lastDenoiseBlockStats = null;
 
     this.port.onmessage = (event) => {
       const data = event?.data;
@@ -32,7 +42,9 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       }
 
       if (data?.type === 'ping-ready' && this.isModuleReady) {
-        this.notifyReady();
+        try {
+          this.port.postMessage('ready');
+        } catch {}
       }
     };
 
@@ -44,6 +56,19 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     try {
       console.info('[dtln-worklet] env', envSnapshot);
     } catch {}
+
+    if (DTLN_BYPASS_MODE) {
+      this.isModuleReady = true;
+      this.notifyReady();
+      this.postDiagnostic({
+        type: 'dtln-bypass-enabled',
+        fixedBufferSize: DTLN_FIXED_BUFFER_SIZE,
+      });
+      try {
+        console.warn('[dtln-worklet] DTLN_BYPASS_MODE enabled: input is routed directly to output');
+      } catch {}
+      return;
+    }
 
     if (!this.tryActivateModule()) {
       try {
@@ -207,6 +232,93 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     }
   }
 
+  calculateBufferStats(buffer, length = buffer?.length || 0) {
+    if (!buffer || length <= 0) {
+      return {
+        rms: 0,
+        peak: 0,
+        min: 0,
+        max: 0,
+      };
+    }
+
+    let sumSquares = 0;
+    let peak = 0;
+    let min = Infinity;
+    let max = -Infinity;
+
+    for (let index = 0; index < length; index += 1) {
+      const sample = buffer[index];
+      const absSample = Math.abs(sample);
+      if (absSample > peak) {
+        peak = absSample;
+      }
+      if (sample < min) {
+        min = sample;
+      }
+      if (sample > max) {
+        max = sample;
+      }
+      sumSquares += sample * sample;
+    }
+
+    return {
+      rms: Math.sqrt(sumSquares / length),
+      peak,
+      min: min === Infinity ? 0 : min,
+      max: max === -Infinity ? 0 : max,
+    };
+  }
+
+  isNearZero(stats) {
+    return (
+      (stats?.rms || 0) <= DTLN_NEAR_ZERO_RMS_THRESHOLD
+      && (stats?.peak || 0) <= DTLN_NEAR_ZERO_PEAK_THRESHOLD
+    );
+  }
+
+  recordOutputMinMax(outputStats) {
+    this.outputMinMaxHistory.push({
+      frame: this.processFrameCount,
+      min: outputStats.min,
+      max: outputStats.max,
+    });
+    if (this.outputMinMaxHistory.length > DTLN_OUTPUT_MINMAX_HISTORY_SIZE) {
+      this.outputMinMaxHistory.shift();
+    }
+  }
+
+  shouldEmitDiagnostics() {
+    this.processFrameCount += 1;
+    if (!DTLN_DIAGNOSTICS_ENABLED) return false;
+    if (this.processFrameCount <= DTLN_DIAGNOSTIC_FIRST_FRAMES) return true;
+    return this.processFrameCount % DTLN_DIAGNOSTIC_INTERVAL_FRAMES === 0;
+  }
+
+  emitFrameDiagnostics(mode, input, output) {
+    if (!this.shouldEmitDiagnostics()) return;
+
+    const inputStats = this.calculateBufferStats(input, input.length);
+    const outputStats = this.calculateBufferStats(output, output.length);
+    this.recordOutputMinMax(outputStats);
+
+    const payload = {
+      type: 'dtln-levels',
+      mode,
+      frame: this.processFrameCount,
+      input: inputStats,
+      output: outputStats,
+      outputNearZero: this.isNearZero(outputStats),
+      outputMinMaxHistory: this.outputMinMaxHistory.slice(),
+      denoiseBlockComparison: this.lastDenoiseBlockStats,
+    };
+
+    this.postDiagnostic(payload);
+    try {
+      console.info('[dtln-worklet] levels', payload);
+    } catch {}
+  }
+
   process(inputs, outputs) {
     if (this.isDisposed) {
       this.fillSilence(outputs);
@@ -222,15 +334,23 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     const output = outputs[0][0];
     const plugin = globalThis.DtlnPlugin;
 
+    if (DTLN_BYPASS_MODE) {
+      output.set(input);
+      this.emitFrameDiagnostics('bypass', input, output);
+      return true;
+    }
+
     if (!this.tryActivateModule()) {
       this.startModuleInitialization();
       output.fill(0);
+      this.emitFrameDiagnostics('module-not-ready', input, output);
       return true;
     }
 
     try {
       if (!plugin) {
         output.fill(0);
+        this.emitFrameDiagnostics('plugin-missing', input, output);
         return true;
       }
 
@@ -242,7 +362,14 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       this.inputIndex += input.length;
 
       if (this.inputIndex >= DTLN_FIXED_BUFFER_SIZE) {
+        const denoiseInputStats = this.calculateBufferStats(this.inputBuffer, DTLN_FIXED_BUFFER_SIZE);
         plugin.dtln_denoise(this.dtlnHandle, this.inputBuffer, this.outputBuffer);
+        const denoiseOutputStats = this.calculateBufferStats(this.outputBuffer, DTLN_FIXED_BUFFER_SIZE);
+        this.lastDenoiseBlockStats = {
+          input: denoiseInputStats,
+          output: denoiseOutputStats,
+          outputNearZero: this.isNearZero(denoiseOutputStats),
+        };
         this.inputIndex = 0;
         this.outputSamples = DTLN_FIXED_BUFFER_SIZE;
       }
@@ -254,8 +381,10 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       } else {
         output.fill(0);
       }
+      this.emitFrameDiagnostics('dtln', input, output);
     } catch (error) {
       output.fill(0);
+      this.emitFrameDiagnostics('dtln-error', input, output);
 
       if (!this.disableMetrics) {
         try {
