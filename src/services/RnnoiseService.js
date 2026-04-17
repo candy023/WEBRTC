@@ -8,6 +8,7 @@
 const DTLN_WORKLET_MODULE_PATH = '/dtln-worklet.js';
 const DTLN_SAMPLE_RATE = 16000;
 const DTLN_READY_TIMEOUT_MS = 5000;
+const DTLN_INPUT_GAIN = 4.0;
 const DTLN_OUTPUT_GAIN = 2.0;
 
 const createDtlnAudioConstraints = (audioDeviceId) => ({
@@ -187,6 +188,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 	let processedTrack = null;
 	let audioContext = null;
 	let sourceNode = null;
+	let preGainNode = null;
 	let workletNode = null;
 	let gainNode = null;
 	let destinationNode = null;
@@ -206,6 +208,10 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 
 		try {
 			sourceNode?.disconnect?.();
+		} catch {}
+
+		try {
+			preGainNode?.disconnect?.();
 		} catch {}
 
 		try {
@@ -282,11 +288,14 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 		});
 
 		sourceNode = audioContext.createMediaStreamSource(rawStream);
+		preGainNode = audioContext.createGain();
+		preGainNode.gain.value = DTLN_INPUT_GAIN;
 		gainNode = audioContext.createGain();
 		gainNode.gain.value = DTLN_OUTPUT_GAIN;
 		destinationNode = audioContext.createMediaStreamDestination();
 
-		sourceNode.connect(workletNode);
+		sourceNode.connect(preGainNode);
+		preGainNode.connect(workletNode);
 		workletNode.connect(gainNode);
 		gainNode.connect(destinationNode);
 
