@@ -58,7 +58,7 @@ export function useStreamReceiver() {
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
-  const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
+  const isRnnoiseEnabled = ref(false);       // RNNoise を有効にするか（初期は OFF）
   // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
   const memberDisplayName = ref('');
   // SkyWay join 専用の内部名。`profiles.nickname` と分離して member.name 制約を満たす。
