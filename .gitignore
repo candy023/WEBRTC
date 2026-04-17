@@ -25,7 +25,7 @@ dist-ssr
 
 
 *.env.local
-
+*.env.example
 First.js
 useMediaControl.js
 useRoomControl.js
@@ -36,4 +36,4 @@ useRoomControl.js
 src/components/services
 src/components/utils
 src/images
-.env.example
+
