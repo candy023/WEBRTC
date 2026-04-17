@@ -288,6 +288,23 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     }
   }
 
+  compareLevelStats(inputStats, outputStats) {
+    const inputRms = inputStats?.rms || 0;
+    const outputRms = outputStats?.rms || 0;
+    if (inputRms <= 0) {
+      return {
+        outputInputRmsRatio: null,
+        outputInputDb: null,
+      };
+    }
+
+    const outputInputRmsRatio = outputRms / inputRms;
+    return {
+      outputInputRmsRatio,
+      outputInputDb: outputRms > 0 ? (20 * Math.log10(outputInputRmsRatio)) : null,
+    };
+  }
+
   shouldEmitDiagnostics() {
     this.processFrameCount += 1;
     if (!DTLN_DIAGNOSTICS_ENABLED) return false;
@@ -308,6 +325,7 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       frame: this.processFrameCount,
       input: inputStats,
       output: outputStats,
+      ...this.compareLevelStats(inputStats, outputStats),
       outputNearZero: this.isNearZero(outputStats),
       outputMinMaxHistory: this.outputMinMaxHistory.slice(),
       denoiseBlockComparison: this.lastDenoiseBlockStats,
@@ -368,6 +386,7 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
         this.lastDenoiseBlockStats = {
           input: denoiseInputStats,
           output: denoiseOutputStats,
+          ...this.compareLevelStats(denoiseInputStats, denoiseOutputStats),
           outputNearZero: this.isNearZero(denoiseOutputStats),
         };
         this.inputIndex = 0;
