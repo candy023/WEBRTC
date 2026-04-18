@@ -143,6 +143,8 @@ export function useRoomSession({
   let rnnoiseHandle = null;
   // 現在 publish 中の local audio stream。差し替え時と leave 時の解放に使う。
   let localAudioStream = null;
+  // 通話中トグルの二重実行で publication 差し替え順序が崩れるのを防ぐ排他フラグ。
+  let replacingLocalAudioForRnnoiseToggle = false;
 
   // join 後に既存 mute state を publication へ再反映し、UI と publish state の不一致を防ぐ。
   const reflectInitialMuteState = async () => {
@@ -374,7 +376,82 @@ export function useRoomSession({
 
   // joined 中に RNNoise ON/OFF が切り替わった場合だけ local audio publication を即時差し替える。
   const replaceLocalAudioForRnnoiseToggle = async () => {
-    return;
+    if (!joined.value) return;
+    if (replacingLocalAudioForRnnoiseToggle) {
+      throw new Error('ノイズ抑制の切り替え処理が実行中です。');
+    }
+
+    replacingLocalAudioForRnnoiseToggle = true;
+
+    // 差し替え候補として先に生成する次の local audio stream と suppressor handle。
+    let nextAudioStream = null;
+    let nextRnnoiseHandle = null;
+    // 失敗時に現在通話へ戻すために保持する rollback 用の publication/stream/handle。
+    const prevAudioPublication = localAudioPublication.value;
+    const prevAudioStream = localAudioStream;
+    const prevRnnoiseHandle = rnnoiseHandle;
+    // replaceStream 非対応時に unpublish 済みかを記録し、失敗時の復旧可否判定に使う。
+    let unpublishedPrevPublication = false;
+
+    try {
+      const createdAudio = await createLocalAudioStream();
+      nextAudioStream = createdAudio.audioStream;
+      nextRnnoiseHandle = createdAudio.nextRnnoiseHandle;
+
+      if (!nextAudioStream) {
+        throw new Error('ローカル音声ストリームの作成に失敗しました。');
+      }
+
+      let nextAudioPublication = prevAudioPublication;
+
+      // replaceStream が使える場合は publication を維持したままストリームだけ差し替える。
+      if (prevAudioPublication && typeof prevAudioPublication.replaceStream === 'function') {
+        await Promise.resolve(prevAudioPublication.replaceStream(nextAudioStream));
+      } else {
+        if (!localMember.value) {
+          throw new Error('Local member is not available.');
+        }
+        if (prevAudioPublication) {
+          await localMember.value.unpublish(prevAudioPublication);
+          unpublishedPrevPublication = true;
+        }
+        nextAudioPublication = await localMember.value.publish(nextAudioStream);
+      }
+
+      if (!nextAudioPublication) {
+        throw new Error('ローカル音声 publication の差し替えに失敗しました。');
+      }
+
+      localAudioPublication.value = nextAudioPublication;
+      localAudioStream = nextAudioStream;
+      rnnoiseHandle = nextRnnoiseHandle;
+
+      if (isAudioMuted.value) {
+        await localAudioPublication.value?.disable?.();
+      }
+
+      releaseLocalStream(prevAudioStream);
+      await cleanupRnnoiseHandle(prevRnnoiseHandle);
+    } catch (error) {
+      releaseLocalStream(nextAudioStream);
+      await cleanupRnnoiseHandle(nextRnnoiseHandle);
+
+      if (unpublishedPrevPublication && prevAudioStream && localMember.value) {
+        try {
+          const restoredAudioPublication = await localMember.value.publish(prevAudioStream);
+          localAudioPublication.value = restoredAudioPublication;
+          if (isAudioMuted.value) {
+            await restoredAudioPublication?.disable?.();
+          }
+        } catch (restoreError) {
+          console.warn('[audio] failed to restore previous local audio publication after toggle failure:', restoreError);
+        }
+      }
+
+      throw error;
+    } finally {
+      replacingLocalAudioForRnnoiseToggle = false;
+    }
   };
 
   // room 退出時に event unbind、media/preview cleanup、join 関連 state reset を順序どおりに実行する。
