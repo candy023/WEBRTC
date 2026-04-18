@@ -14,6 +14,13 @@ const createStandardAudioConstraints = (audioDeviceId) => ({
   ...(audioDeviceId ? { deviceId: audioDeviceId } : {})
 });
 
+const createSuppressorAudioConstraints = (audioDeviceId) => ({
+  noiseSuppression: false,
+  echoCancellation: true,
+  autoGainControl: false,
+  ...(audioDeviceId ? { deviceId: audioDeviceId } : {})
+});
+
 // composable 側の分岐を単純化するための固定返却 shape。
 const createResult = (constraints) => ({
   constraints,
@@ -46,9 +53,13 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
   void onVad;
 
   const constraints = {
-    audio: createStandardAudioConstraints(audioDeviceId),
+    audio: enabled
+      ? createSuppressorAudioConstraints(audioDeviceId)
+      : createStandardAudioConstraints(audioDeviceId),
   };
-  const fallbackResult = createResult(constraints);
+  const fallbackResult = createResult({
+    audio: createStandardAudioConstraints(audioDeviceId),
+  });
 
   if (!enabled) {
     return fallbackResult;
