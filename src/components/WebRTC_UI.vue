@@ -427,7 +427,7 @@ onBeforeRouteLeave(async () => {
       <div v-if="errorMessage" class="mt-2 text-xs text-red-600">{{ errorMessage }}</div>
       <div class="mt-2 text-xs text-gray-600">カメラ OFF 中も設定は保持されます</div>
       <div class="mt-1 text-xs text-gray-600">画面共有中は背景処理は無効です</div>
-      <div class="mt-1 text-xs text-gray-600">ノイズ抑制の切り替えは次回入室時に反映されます</div>
+      <div class="mt-1 text-xs text-gray-600">ノイズ抑制の切り替えは通話中にも反映されます</div>
     </header>
 
     <div v-if="showCameraPanel" class="mt-2 p-3 bg-white border rounded shadow absolute z-50">
