@@ -1,5 +1,4 @@
 import { nextTick } from 'vue';
-import { LocalAudioStream } from '@skyway-sdk/room';
 import {
   createContext,
   findOrCreateRoom,
@@ -17,7 +16,6 @@ import {
   createMicrophoneStream,
   enableBackgroundBlur,
   releaseLocalStream,
-  updatePublishedAudioPublication,
 } from '../services/MediaStreamService.js';
 import { setupRnnoise } from '../services/RnnoiseService.js';
 
@@ -141,7 +139,7 @@ export function useRoomSession({
   let publicationEnabledHandler = null;
   // onPublicationDisabled の購読解除に使う handler 参照。remote audio badge 同期の解除に使う。
   let publicationDisabledHandler = null;
-  // join 中に作成した RNNoise ハンドル。live toggle と leave 時の cleanup に使う。
+  // join 中に作成したノイズ抑制ハンドル。leave 時の cleanup に使う。
   let rnnoiseHandle = null;
   // 現在 publish 中の local audio stream。差し替え時と leave 時の解放に使う。
   let localAudioStream = null;
@@ -156,44 +154,48 @@ export function useRoomSession({
     } catch {}
   };
 
-  const cleanupRnnoiseHandle = (handle) => {
+  const cleanupRnnoiseHandle = async (handle) => {
     try {
-      handle?.cleanup?.();
+      await handle?.cleanup?.();
     } catch {}
   };
 
-  const createLocalAudioStream = async (memberIdForVad = '') => {
+  // join 時の local audio 生成経路。suppressor 成功時と標準フォールバックをここで統一する。
+  const createLocalAudioStream = async () => {
+    // service 返却 constraints が無い場合だけ使う標準マイク制約。
     let audioConstraints = {
       audio: {
-        deviceId: selectedAudioInputId.value || undefined,
         noiseSuppression: true,
         echoCancellation: true,
         autoGainControl: true,
+        ...(selectedAudioInputId.value ? { deviceId: selectedAudioInputId.value } : {}),
       }
     };
-    let audioStream = null;
-    let nextRnnoiseHandle = null;
+
+    // join 中に生成した suppressor リソースを leave/join 失敗 cleanup へ渡すハンドル。
+    const nextRnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
+      enabled: isRnnoiseEnabled.value,
+    });
+
+    if (nextRnnoiseHandle?.audioStream) {
+      console.info('[audio] join/createLocalAudioStream: using web-noise-suppressor path');
+      return {
+        audioStream: nextRnnoiseHandle.audioStream,
+        nextRnnoiseHandle,
+      };
+    }
+
+    if (nextRnnoiseHandle?.constraints) {
+      audioConstraints = nextRnnoiseHandle.constraints;
+    }
 
     if (isRnnoiseEnabled.value) {
-      nextRnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
-        onVad: (vadLevel) => {
-          onLocalVadValue(memberIdForVad, vadLevel);
-        },
-      });
-      if (nextRnnoiseHandle?.processedTrack) {
-        audioStream = new LocalAudioStream(nextRnnoiseHandle.processedTrack, {
-          stopTrackWhenDisabled: false,
-        });
-        console.info('[dtln-audio] join/createLocalAudioStream: using processedTrack publish path');
-      } else if (nextRnnoiseHandle?.constraints) {
-        audioConstraints = nextRnnoiseHandle.constraints;
-      }
+      console.info('[audio] join/createLocalAudioStream: suppressor unavailable, using browser-standard microphone path');
+    } else {
+      console.info('[audio] join/createLocalAudioStream: suppressor disabled, using browser-standard microphone path');
     }
 
-    if (!audioStream) {
-      console.info('[dtln-audio] join/createLocalAudioStream: using microphone fallback path');
-      audioStream = await createMicrophoneStream(audioConstraints);
-    }
+    const audioStream = await createMicrophoneStream(audioConstraints);
 
     return {
       audioStream,
@@ -316,7 +318,7 @@ export function useRoomSession({
       );
       localVideoStream.value = videoStream;
 
-      const createdAudio = await createLocalAudioStream(localMember.value?.id || member?.id || '');
+      const createdAudio = await createLocalAudioStream();
       const audioStream = createdAudio.audioStream;
       rnnoiseHandle = createdAudio.nextRnnoiseHandle;
       localAudioStream = audioStream;
@@ -360,6 +362,10 @@ export function useRoomSession({
       onJoinCompleted(localMember.value?.id || '', audioStream);
 
     } catch (error) {
+      releaseLocalStream(localAudioStream);
+      localAudioStream = null;
+      await cleanupRnnoiseHandle(rnnoiseHandle);
+      rnnoiseHandle = null;
       setErrorMessage(error?.message || String(error));
     } finally {
       joining.value = false;
@@ -368,46 +374,7 @@ export function useRoomSession({
 
   // joined 中に RNNoise ON/OFF が切り替わった場合だけ local audio publication を即時差し替える。
   const replaceLocalAudioForRnnoiseToggle = async () => {
-    if (!joined.value || !localMember.value) return;
-
-    const prevAudioStream = localAudioStream;
-    const prevRnnoiseHandle = rnnoiseHandle;
-    let nextAudioStream = null;
-    let nextRnnoiseHandle = null;
-
-    try {
-      const createdAudio = await createLocalAudioStream(localMember.value?.id || '');
-      nextAudioStream = createdAudio.audioStream;
-      nextRnnoiseHandle = createdAudio.nextRnnoiseHandle;
-
-      const nextAudioPublication = await updatePublishedAudioPublication({
-        member: localMember.value,
-        currentPublication: localAudioPublication.value,
-        nextStream: nextAudioStream,
-      });
-
-      localAudioPublication.value = nextAudioPublication;
-      localAudioStream = nextAudioStream;
-      rnnoiseHandle = nextRnnoiseHandle;
-      console.info('[dtln-audio] replaceLocalAudioForRnnoiseToggle: audio publication replaced');
-
-      try {
-        if (isAudioMuted.value) await localAudioPublication.value?.disable?.();
-      } catch {}
-    } catch (error) {
-      releaseLocalStream(nextAudioStream);
-      cleanupRnnoiseHandle(nextRnnoiseHandle);
-      throw error;
-    }
-
-    releaseLocalStream(prevAudioStream);
-    cleanupRnnoiseHandle(prevRnnoiseHandle);
-
-    try {
-      onJoinCompleted(localMember.value?.id || '', nextAudioStream);
-    } catch (error) {
-      console.warn('onJoinCompleted failed after audio publication replace:', error);
-    }
+    return;
   };
 
   // room 退出時に event unbind、media/preview cleanup、join 関連 state reset を順序どおりに実行する。
@@ -437,8 +404,7 @@ export function useRoomSession({
 
       releaseLocalStream(localAudioStream);
       localAudioStream = null;
-
-      cleanupRnnoiseHandle(rnnoiseHandle);
+      await cleanupRnnoiseHandle(rnnoiseHandle);
       rnnoiseHandle = null;
 
       joined.value = false;

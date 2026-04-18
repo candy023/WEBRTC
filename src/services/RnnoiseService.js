@@ -1,363 +1,168 @@
-// RnnoiseService.js
-// 責務:
-// ・選択中のマイクから元の audio track を取得する
-// ・DataDog/dtln-rs の AudioWorklet で処理済み track を生成する
-// ・publish 側で使うための fallback 情報と cleanup を返す
-// ※ファイル名は既存 import 互換のため維持する
+import { LocalAudioStream } from '@skyway-sdk/room';
+import { SpeexWorkletNode, loadSpeex } from '@sapphi-red/web-noise-suppressor';
+import speexWorkletPath from '@sapphi-red/web-noise-suppressor/speexWorklet.js?url';
+import speexWasmPath from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
 
-const DTLN_WORKLET_MODULE_PATH = '/dtln-worklet.js';
-const DTLN_SAMPLE_RATE = 16000;
-const DTLN_READY_TIMEOUT_MS = 5000;
-const DTLN_INPUT_GAIN = 4.0;
-const DTLN_OUTPUT_GAIN = 2.0;
+// Speex suppressor はローカル音声 publish 経路を単一チャネルで処理する。
+const SUPPRESSOR_MAX_CHANNELS = 1;
 
-const createDtlnAudioConstraints = (audioDeviceId) => ({
-	noiseSuppression: false,
-	echoCancellation: true,
-	autoGainControl: true,
-	channelCount: 1,
-	...(audioDeviceId ? { deviceId: audioDeviceId } : {})
+// browser 標準経路に戻すときに使う共通マイク制約。
+const createStandardAudioConstraints = (audioDeviceId) => ({
+  noiseSuppression: true,
+  echoCancellation: true,
+  autoGainControl: true,
+  ...(audioDeviceId ? { deviceId: audioDeviceId } : {})
 });
 
-const createNoneAudioConstraints = (audioDeviceId) => ({
-	noiseSuppression: true,
-	echoCancellation: true,
-	autoGainControl: true,
-	...(audioDeviceId ? { deviceId: audioDeviceId } : {})
+// composable 側の分岐を単純化するための固定返却 shape。
+const createResult = (constraints) => ({
+  constraints,
+  originalTrack: null,
+  processedTrack: null,
+  denoisedTrack: null,
+  processor: null,
+  audioStream: null,
+  cleanup: () => {},
+  isActive: false
 });
 
-const createFallbackResult = (constraints) => ({
-	constraints,
-	originalTrack: null,
-	processedTrack: null,
-	denoisedTrack: null,
-	processor: null,
-	cleanup: () => {},
-	isActive: false
-});
+// web-noise-suppressor に必要な Web Audio / getUserMedia の対応可否を判定する。
+const isWebNoiseSuppressorSupported = () => {
+  const AudioContextCtor =
+    (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
+    || null;
 
-const createTrackProfile = (track) => {
-	if (!track) return null;
-
-	let settings = null;
-	let constraints = null;
-
-	try {
-		settings = track.getSettings?.() || null;
-	} catch {}
-
-	try {
-		constraints = track.getConstraints?.() || null;
-	} catch {}
-
-	return {
-		id: track.id || null,
-		label: track.label || '',
-		enabled: !!track.enabled,
-		muted: !!track.muted,
-		readyState: track.readyState || 'unknown',
-		settings,
-		constraints,
-	};
+  return !!(
+    AudioContextCtor
+    && typeof AudioWorkletNode !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && navigator.mediaDevices
+    && typeof navigator.mediaDevices.getUserMedia === 'function'
+  );
 };
 
-const createWorkletDiagnosticLogger = () => (event) => {
-	const data = event?.data;
-	if (!data || typeof data !== 'object') return;
-
-	if (
-		data.type === 'dtln-worklet-env'
-		|| data.type === 'dtln-bypass-enabled'
-		|| data.type === 'dtln-levels'
-	) {
-		console.info('[dtln-audio] worklet diagnostic', data);
-	}
-};
-
-const isDtlnAudioWorkletSupported = () => {
-	const AudioContextCtor =
-		(typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext))
-		|| null;
-
-	return !!(
-		AudioContextCtor
-		&& typeof AudioWorkletNode !== 'undefined'
-		&& typeof navigator !== 'undefined'
-		&& navigator.mediaDevices
-		&& typeof navigator.mediaDevices.getUserMedia === 'function'
-	);
-};
-
-const waitForDtlnReady = (workletNode, timeoutMs = DTLN_READY_TIMEOUT_MS) => (
-	new Promise((resolve) => {
-		let finished = false;
-		let timer = null;
-
-		const cleanup = () => {
-			if (timer) {
-				clearTimeout(timer);
-				timer = null;
-			}
-
-			try {
-				if (typeof workletNode?.port?.removeEventListener === 'function') {
-					workletNode.port.removeEventListener('message', onMessage);
-				}
-			} catch {}
-
-			try {
-				if (workletNode?.port) {
-					workletNode.port.onmessage = null;
-				}
-			} catch {}
-		};
-
-		const finish = (ready) => {
-			if (finished) return;
-			finished = true;
-			cleanup();
-			resolve(ready);
-		};
-
-		const onMessage = (event) => {
-			const data = event?.data;
-			if (data === 'ready') {
-				finish(true);
-				return;
-			}
-			if (data?.type === 'error') {
-				finish(false);
-			}
-		};
-
-		timer = setTimeout(() => {
-			finish(false);
-		}, timeoutMs);
-
-		try {
-			if (typeof workletNode?.port?.addEventListener === 'function') {
-				workletNode.port.addEventListener('message', onMessage);
-				workletNode.port.start?.();
-			} else if (workletNode?.port) {
-				workletNode.port.onmessage = onMessage;
-			}
-		} catch {
-			finish(false);
-			return;
-		}
-
-		try {
-			workletNode?.port?.postMessage?.({ type: 'ping-ready' });
-		} catch {}
-	})
-);
-
-/**
- * ノイズ抑制を初期化し、処理済み track と fallback 用 constraints を返す。
- *
- * @param {string} audioDeviceId マイク deviceId。空の場合はブラウザ既定入力を使う。
- * @param {{ onVad?: (vadLevel: number) => void }} [options]
- *   将来互換のため受け取るオプション。現実装では VAD 通知は行わない。
- * @returns {Promise<{
- *   constraints: { audio: MediaTrackConstraints },
- *   originalTrack: MediaStreamTrack | null,
- *   processedTrack: MediaStreamTrack | null,
- *   denoisedTrack: MediaStreamTrack | null,
- *   processor: AudioWorkletNode | null,
- *   audioContext?: AudioContext | null,
- *   cleanup: () => void,
- *   isActive: boolean,
- * }>}
- * @throws {never}
- * @sideeffects マイクストリーム取得、AudioWorklet の初期化、処理済み track 生成を行う。
- */
 export async function setupRnnoise(audioDeviceId, options = {}) {
-	// 既存 API 互換のため受け取る。現実装では未使用。
-	const { onVad = () => {} } = options;
-	void onVad;
+  const { onVad = () => {}, enabled = false } = options;
+  void onVad;
 
-	const dtlnAudioConstraints = createDtlnAudioConstraints(audioDeviceId);
-	const noneAudioConstraints = createNoneAudioConstraints(audioDeviceId);
+  const constraints = {
+    audio: createStandardAudioConstraints(audioDeviceId),
+  };
+  const fallbackResult = createResult(constraints);
 
-	const constraints = { audio: dtlnAudioConstraints };
-	const fallbackResult = createFallbackResult({ audio: noneAudioConstraints });
+  if (!enabled) {
+    return fallbackResult;
+  }
 
-	// cleanup と catch で安全に止めるため、生成した資源を外側で保持する。
-	let rawStream = null;
-	let originalTrack = null;
-	let processedTrack = null;
-	let audioContext = null;
-	let sourceNode = null;
-	let preGainNode = null;
-	let workletNode = null;
-	let gainNode = null;
-	let destinationNode = null;
-	let workletDiagnosticLogger = null;
+  if (!isWebNoiseSuppressorSupported()) {
+    console.warn('[audio] web-noise-suppressor unsupported, fallback to browser-standard microphone path');
+    return fallbackResult;
+  }
 
-	const releaseCreatedResources = () => {
-		try {
-			if (workletDiagnosticLogger && typeof workletNode?.port?.removeEventListener === 'function') {
-				workletNode.port.removeEventListener('message', workletDiagnosticLogger);
-			}
-		} catch {}
-		workletDiagnosticLogger = null;
+  let rawStream = null;
+  let originalTrack = null;
+  let audioContext = null;
+  let sourceNode = null;
+  let suppressorNode = null;
+  let destinationNode = null;
+  let processedTrack = null;
+  let cleaned = false;
 
-		try {
-			workletNode?.port?.postMessage?.({ type: 'shutdown' });
-		} catch {}
+  // suppressor 初期化中に生成したリソースを二重解放なしで安全に回収する。
+  const releaseCreatedResources = async () => {
+    if (cleaned) return;
+    cleaned = true;
 
-		try {
-			sourceNode?.disconnect?.();
-		} catch {}
+    try {
+      sourceNode?.disconnect?.();
+    } catch {}
 
-		try {
-			preGainNode?.disconnect?.();
-		} catch {}
+    try {
+      suppressorNode?.disconnect?.();
+    } catch {}
 
-		try {
-			workletNode?.disconnect?.();
-		} catch {}
+    try {
+      destinationNode?.disconnect?.();
+    } catch {}
 
-		try {
-			gainNode?.disconnect?.();
-		} catch {}
+    try {
+      suppressorNode?.destroy?.();
+    } catch {}
 
-		try {
-			destinationNode?.disconnect?.();
-		} catch {}
+    try {
+      processedTrack?.stop?.();
+    } catch {}
 
-		try {
-			processedTrack?.stop?.();
-		} catch {}
+    try {
+      rawStream?.getTracks?.().forEach((track) => track.stop());
+    } catch {}
 
-		try {
-			rawStream?.getTracks?.().forEach((track) => track.stop());
-		} catch {}
+    try {
+      await audioContext?.close?.();
+    } catch {}
+  };
 
-		try {
-			audioContext?.close?.();
-		} catch {}
-	};
+  try {
+    rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+    originalTrack = rawStream.getAudioTracks()[0] || null;
 
-	try {
-		if (!isDtlnAudioWorkletSupported()) {
-			console.warn('[dtln-audio] setupRnnoise: AudioWorklet unsupported, fallback to microphone path');
-			return fallbackResult;
-		}
+    if (!originalTrack) {
+      await releaseCreatedResources();
+      return fallbackResult;
+    }
 
-		rawStream = await navigator.mediaDevices.getUserMedia(constraints);
-		originalTrack = rawStream.getAudioTracks()[0] || null;
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioContextCtor({ latencyHint: 'interactive' });
 
-		if (!originalTrack) {
-			console.warn('[dtln-audio] setupRnnoise: getUserMedia succeeded but originalTrack is missing, fallback to microphone path');
-			releaseCreatedResources();
-			return fallbackResult;
-		}
-		console.info('[dtln-audio] setupRnnoise: raw track profile', createTrackProfile(originalTrack));
+    const wasmBinary = await loadSpeex({ url: speexWasmPath });
+    await audioContext.audioWorklet.addModule(speexWorkletPath);
 
-		const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-		audioContext = new AudioContextCtor({
-			sampleRate: DTLN_SAMPLE_RATE,
-			latencyHint: 'interactive'
-		});
-		console.info('[dtln-audio] setupRnnoise: audio context profile', {
-			sampleRate: audioContext.sampleRate,
-			state: audioContext.state,
-			baseLatency: audioContext.baseLatency,
-			outputLatency: audioContext.outputLatency,
-		});
+    sourceNode = audioContext.createMediaStreamSource(rawStream);
+    suppressorNode = new SpeexWorkletNode(audioContext, {
+      maxChannels: SUPPRESSOR_MAX_CHANNELS,
+      wasmBinary,
+    });
+    destinationNode = audioContext.createMediaStreamDestination();
 
-		try {
-			await audioContext.audioWorklet.addModule(DTLN_WORKLET_MODULE_PATH);
-		} catch (error) {
-			console.warn('[dtln-audio] setupRnnoise: addModule failed, fallback to microphone path', error);
-			releaseCreatedResources();
-			return fallbackResult;
-		}
+    sourceNode.connect(suppressorNode);
+    suppressorNode.connect(destinationNode);
 
-		workletNode = new AudioWorkletNode(audioContext, 'NoiseSuppressionWorker', {
-			channelCount: 1,
-			channelCountMode: 'explicit',
-			channelInterpretation: 'speakers',
-			numberOfInputs: 1,
-			numberOfOutputs: 1,
-			outputChannelCount: [1],
-			processorOptions: {
-				disableMetrics: true
-			}
-		});
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
 
-		sourceNode = audioContext.createMediaStreamSource(rawStream);
-		preGainNode = audioContext.createGain();
-		preGainNode.gain.value = DTLN_INPUT_GAIN;
-		gainNode = audioContext.createGain();
-		gainNode.gain.value = DTLN_OUTPUT_GAIN;
-		destinationNode = audioContext.createMediaStreamDestination();
+    // publish へ渡す音声トラック。取得できない場合は標準マイク経路へ戻す。
+    processedTrack = destinationNode.stream.getAudioTracks()[0] || null;
+    if (!processedTrack || processedTrack.readyState === 'ended') {
+      await releaseCreatedResources();
+      return fallbackResult;
+    }
 
-		sourceNode.connect(preGainNode);
-		preGainNode.connect(workletNode);
-		workletNode.connect(gainNode);
-		gainNode.connect(destinationNode);
+    // cleanup 実行済みかどうかを呼び出し側が参照できる状態フラグ。
+    let active = true;
+    const cleanup = async () => {
+      if (!active) return;
+      active = false;
+      await releaseCreatedResources();
+    };
 
-		if (audioContext.state === 'suspended') {
-			await audioContext.resume();
-		}
-
-		const isReady = await waitForDtlnReady(workletNode, DTLN_READY_TIMEOUT_MS);
-		if (!isReady) {
-			console.warn('[dtln-audio] setupRnnoise: waitForDtlnReady returned false (timeout or not ready), fallback to microphone path');
-			releaseCreatedResources();
-			return fallbackResult;
-		}
-		workletDiagnosticLogger = createWorkletDiagnosticLogger();
-		try {
-			if (typeof workletNode?.port?.addEventListener === 'function') {
-				workletNode.port.addEventListener('message', workletDiagnosticLogger);
-				workletNode.port.start?.();
-			}
-		} catch {}
-
-		processedTrack = destinationNode.stream.getAudioTracks()[0] || null;
-		if (!processedTrack || processedTrack.readyState === 'ended') {
-			console.warn('[dtln-audio] setupRnnoise: processedTrack missing or ended, fallback to microphone path', {
-				hasProcessedTrack: !!processedTrack,
-				readyState: processedTrack?.readyState || 'missing',
-			});
-			releaseCreatedResources();
-			return fallbackResult;
-		}
-		console.info('[dtln-audio] setupRnnoise: processedTrack ready, using dtln path');
-		console.info('[dtln-audio] setupRnnoise: processed track profile', createTrackProfile(processedTrack));
-
-		let active = !!processedTrack;
-		let cleaned = false;
-
-		const cleanup = () => {
-			if (cleaned) return;
-			cleaned = true;
-
-			releaseCreatedResources();
-			active = false;
-		};
-
-		return {
-			constraints,
-			originalTrack,
-			processedTrack: processedTrack || null,
-			// 既存の denoisedTrack 参照が残っていても壊れないように互換キーを残す。
-			denoisedTrack: processedTrack || null,
-			processor: workletNode || null,
-			audioContext: audioContext || null,
-			cleanup,
-			get isActive() {
-				return active;
-			}
-		};
-
-	} catch (e) {
-		console.warn('DTLN 初期化失敗:', e);
-		releaseCreatedResources();
-
-		return fallbackResult;
-	}
+    return {
+      constraints,
+      originalTrack,
+      processedTrack,
+      denoisedTrack: processedTrack,
+      processor: suppressorNode,
+      audioStream: new LocalAudioStream(processedTrack, {
+        stopTrackWhenDisabled: false,
+      }),
+      cleanup,
+      get isActive() {
+        return active;
+      }
+    };
+  } catch (error) {
+    console.warn('[audio] web-noise-suppressor init failed. fallback to browser-standard microphone path:', error);
+    await releaseCreatedResources();
+    return fallbackResult;
+  }
 }

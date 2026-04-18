@@ -10,6 +10,7 @@
     "build:dtln:singlefile": "node scripts/build-dtln-singlefile.mjs"
   },
   "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "^0.3.5",
     "@shiguredo/noise-suppression": "^2025.1.0",
     "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@skyway-sdk/room": "^1.15.1",
