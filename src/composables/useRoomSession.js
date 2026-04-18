@@ -17,6 +17,7 @@ import {
   enableBackgroundBlur,
   releaseLocalStream,
 } from '../services/MediaStreamService.js';
+import { setupRnnoise } from '../services/RnnoiseService.js';
 
 const normalizeMemberDisplayName = (memberDisplayName) => {
   if (typeof memberDisplayName !== 'string') {
@@ -138,6 +139,8 @@ export function useRoomSession({
   let publicationEnabledHandler = null;
   // onPublicationDisabled の購読解除に使う handler 参照。remote audio badge 同期の解除に使う。
   let publicationDisabledHandler = null;
+  // join 中に作成したノイズ抑制ハンドル。leave 時の cleanup に使う。
+  let rnnoiseHandle = null;
   // 現在 publish 中の local audio stream。差し替え時と leave 時の解放に使う。
   let localAudioStream = null;
 
@@ -151,20 +154,52 @@ export function useRoomSession({
     } catch {}
   };
 
+  const cleanupRnnoiseHandle = async (handle) => {
+    try {
+      await handle?.cleanup?.();
+    } catch {}
+  };
+
+  // join 時の local audio 生成経路。suppressor 成功時と標準フォールバックをここで統一する。
   const createLocalAudioStream = async () => {
-    const audioConstraints = {
+    // service 返却 constraints が無い場合だけ使う標準マイク制約。
+    let audioConstraints = {
       audio: {
-        deviceId: selectedAudioInputId.value || undefined,
         noiseSuppression: true,
         echoCancellation: true,
         autoGainControl: true,
+        ...(selectedAudioInputId.value ? { deviceId: selectedAudioInputId.value } : {}),
       }
     };
-    console.info('[audio] join/createLocalAudioStream: using browser-standard microphone path');
+
+    // join 中に生成した suppressor リソースを leave/join 失敗 cleanup へ渡すハンドル。
+    const nextRnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
+      enabled: isRnnoiseEnabled.value,
+    });
+
+    if (nextRnnoiseHandle?.audioStream) {
+      console.info('[audio] join/createLocalAudioStream: using web-noise-suppressor path');
+      return {
+        audioStream: nextRnnoiseHandle.audioStream,
+        nextRnnoiseHandle,
+      };
+    }
+
+    if (nextRnnoiseHandle?.constraints) {
+      audioConstraints = nextRnnoiseHandle.constraints;
+    }
+
+    if (isRnnoiseEnabled.value) {
+      console.info('[audio] join/createLocalAudioStream: suppressor unavailable, using browser-standard microphone path');
+    } else {
+      console.info('[audio] join/createLocalAudioStream: suppressor disabled, using browser-standard microphone path');
+    }
+
     const audioStream = await createMicrophoneStream(audioConstraints);
 
     return {
       audioStream,
+      nextRnnoiseHandle,
     };
   };
 
@@ -285,6 +320,7 @@ export function useRoomSession({
 
       const createdAudio = await createLocalAudioStream();
       const audioStream = createdAudio.audioStream;
+      rnnoiseHandle = createdAudio.nextRnnoiseHandle;
       localAudioStream = audioStream;
 
       const publications = await publishLocal(member, {
@@ -326,6 +362,10 @@ export function useRoomSession({
       onJoinCompleted(localMember.value?.id || '', audioStream);
 
     } catch (error) {
+      releaseLocalStream(localAudioStream);
+      localAudioStream = null;
+      await cleanupRnnoiseHandle(rnnoiseHandle);
+      rnnoiseHandle = null;
       setErrorMessage(error?.message || String(error));
     } finally {
       joining.value = false;
@@ -364,6 +404,8 @@ export function useRoomSession({
 
       releaseLocalStream(localAudioStream);
       localAudioStream = null;
+      await cleanupRnnoiseHandle(rnnoiseHandle);
+      rnnoiseHandle = null;
 
       joined.value = false;
       isScreenSharing.value = false;
