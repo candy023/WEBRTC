@@ -5,6 +5,10 @@ import speexWasmPath from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
 
 // Speex suppressor はローカル音声 publish 経路を単一チャネルで処理する。
 const SUPPRESSOR_MAX_CHANNELS = 1;
+// suppressor 経路でのみ使う前段 high-pass filter の固定初期値。
+const SUPPRESSOR_HIGHPASS_TYPE = 'highpass';
+const SUPPRESSOR_HIGHPASS_FREQUENCY_HZ = 120;
+const SUPPRESSOR_HIGHPASS_Q = 0.707;
 
 // browser 標準経路に戻すときに使う共通マイク制約。
 const createStandardAudioConstraints = (audioDeviceId) => ({
@@ -20,6 +24,24 @@ const createSuppressorAudioConstraints = (audioDeviceId) => ({
   autoGainControl: false,
   ...(audioDeviceId ? { deviceId: audioDeviceId } : {})
 });
+
+const AUDIO_NOISE_SUPPRESSION_MODES = new Set([
+  'off',
+  'standard',
+  'suppressor',
+  'rnnoise',
+  'dtln',
+]);
+
+const normalizeAudioNoiseSuppressionMode = (mode) => {
+  if (typeof mode !== 'string') {
+    return 'standard';
+  }
+  if (!AUDIO_NOISE_SUPPRESSION_MODES.has(mode)) {
+    return 'standard';
+  }
+  return mode;
+};
 
 // composable 側の分岐を単純化するための固定返却 shape。
 const createResult = (constraints) => ({
@@ -49,11 +71,15 @@ const isWebNoiseSuppressorSupported = () => {
 };
 
 export async function setupRnnoise(audioDeviceId, options = {}) {
-  const { onVad = () => {}, enabled = false } = options;
+  const { onVad = () => {}, mode, enabled } = options;
   void onVad;
+  const resolvedMode = normalizeAudioNoiseSuppressionMode(
+    mode ?? (enabled ? 'suppressor' : 'standard')
+  );
+  const suppressorEnabled = resolvedMode === 'suppressor';
 
   const constraints = {
-    audio: enabled
+    audio: suppressorEnabled
       ? createSuppressorAudioConstraints(audioDeviceId)
       : createStandardAudioConstraints(audioDeviceId),
   };
@@ -61,7 +87,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     audio: createStandardAudioConstraints(audioDeviceId),
   });
 
-  if (!enabled) {
+  if (!suppressorEnabled) {
     return fallbackResult;
   }
 
@@ -74,6 +100,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
   let originalTrack = null;
   let audioContext = null;
   let sourceNode = null;
+  let highPassNode = null;
   let suppressorNode = null;
   let destinationNode = null;
   let processedTrack = null;
@@ -86,6 +113,10 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
 
     try {
       sourceNode?.disconnect?.();
+    } catch {}
+
+    try {
+      highPassNode?.disconnect?.();
     } catch {}
 
     try {
@@ -129,13 +160,18 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     await audioContext.audioWorklet.addModule(speexWorkletPath);
 
     sourceNode = audioContext.createMediaStreamSource(rawStream);
+    highPassNode = audioContext.createBiquadFilter();
+    highPassNode.type = SUPPRESSOR_HIGHPASS_TYPE;
+    highPassNode.frequency.value = SUPPRESSOR_HIGHPASS_FREQUENCY_HZ;
+    highPassNode.Q.value = SUPPRESSOR_HIGHPASS_Q;
     suppressorNode = new SpeexWorkletNode(audioContext, {
       maxChannels: SUPPRESSOR_MAX_CHANNELS,
       wasmBinary,
     });
     destinationNode = audioContext.createMediaStreamDestination();
 
-    sourceNode.connect(suppressorNode);
+    sourceNode.connect(highPassNode);
+    highPassNode.connect(suppressorNode);
     suppressorNode.connect(destinationNode);
 
     if (audioContext.state === 'suspended') {
