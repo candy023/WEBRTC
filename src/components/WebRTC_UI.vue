@@ -2,7 +2,7 @@
 // このコンポーネントは UI 表示に専念します。
 // - 実際の WebRTC / SkyWay の接続やメディア処理は `useStreamReceiver` と各 services に委譲しています。
 // - ここでは「なぜその ref/関数が必要か」を示すコメントを残し、UI 側の意図を明確にします。
-import { computed } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
 import { useStreamReceiver } from '../composables/useStreamReceiver.js';
 
@@ -55,8 +55,6 @@ const {
   // パネルの表示トグル（URL 共有、設定など）: UI の開閉状態管理に使う
   showShareOpen,
   showSettingsOpen,
-  // 全画面表示中の video 要素参照。全画面化は DOM を body に移動させるため、この参照で状態管理する
-  enlargedVideo,
   // デバイスリストと選択状態（UI 側の選択肢表示と確定操作のために useStreamReceiver が提供）
   videoInputDevices,
   audioInputDevices,
@@ -92,9 +90,8 @@ const {
   openSpeakerPanel,
   cancelSpeakerPanel,
   confirmSpeakerPanel,
-  // 全画面化処理（DOM を移動するため UI が要素を渡す責務を持つ）。実際の DOM 操作は VideoUIService 側で行う
-  enlargeVideo,
-  shrinkVideo,
+  getRemoteParticipantVolume,
+  setRemoteParticipantVolume,
 } = useStreamReceiver();
 
 const selectedMainShareTile = computed(() => {
@@ -120,22 +117,84 @@ const hasMainShare = computed(() => {
   return !!selectedMainShareTile.value;
 });
 
+const hasShareTiles = computed(() => {
+  return screenShareTiles.value.length > 0;
+});
+
+const selectedMainCameraMemberId = ref(null);
+const isMobileViewport = ref(false);
+const participantMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  memberId: '',
+  pubId: '',
+  isLocal: false,
+  volumeOpen: false,
+});
+
+const selectedMainCameraTile = computed(() => {
+  if (!selectedMainCameraMemberId.value) return null;
+  return cameraFilmstripTiles.value.find((tile) => tile.memberId === selectedMainCameraMemberId.value) || null;
+});
+
+const hasMainCamera = computed(() => {
+  return !hasShareTiles.value && !!selectedMainCameraTile.value;
+});
+
+const hasMainDisplay = computed(() => {
+  return hasMainShare.value || hasMainCamera.value;
+});
+
+const cameraTilesForList = computed(() => {
+  if (!hasMainCamera.value || !selectedMainCameraMemberId.value) {
+    return cameraFilmstripTiles.value;
+  }
+
+  return cameraFilmstripTiles.value.filter((tile) => tile.memberId !== selectedMainCameraMemberId.value);
+});
+
+const localSelfPreviewMenuTile = computed(() => {
+  return {
+    memberId: localMember.value?.id || '',
+    pubId: 'local-self-preview',
+    isLocal: true,
+  };
+});
+
+const isMenuTargetMainCamera = computed(() => {
+  if (!participantMenu.value.memberId) return false;
+  return !hasShareTiles.value && participantMenu.value.memberId === selectedMainCameraMemberId.value;
+});
+
+const currentMenuVolume = computed(() => {
+  if (!participantMenu.value.memberId || participantMenu.value.isLocal) {
+    return 100;
+  }
+
+  return getRemoteParticipantVolume(participantMenu.value.memberId);
+});
+
+const shouldShowMobileVolumeSection = computed(() => {
+  return isMobileViewport.value && !participantMenu.value.isLocal;
+});
+
 const roomLayoutClass = computed(() => {
-  return hasMainShare.value
+  return hasMainDisplay.value
     ? 'space-y-4 md:space-y-5 lg:grid lg:grid-cols-5 lg:gap-3 lg:items-start lg:space-y-0'
     : 'space-y-4 md:space-y-5';
 });
 
 const shareAreaClass = computed(() => {
-  return hasMainShare.value ? 'space-y-4 md:space-y-5 lg:col-span-4' : 'space-y-4 md:space-y-5';
+  return hasMainDisplay.value ? 'space-y-4 md:space-y-5 lg:col-span-4' : 'space-y-4 md:space-y-5';
 });
 
 const cameraAreaClass = computed(() => {
-  return hasMainShare.value ? 'space-y-2 lg:col-span-1' : 'space-y-2';
+  return hasMainDisplay.value ? 'space-y-2 lg:col-span-1' : 'space-y-2';
 });
 
 const cameraGridClass = computed(() => {
-  return hasMainShare.value
+  return hasMainDisplay.value
     ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-1'
     : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4';
 });
@@ -151,7 +210,7 @@ const shouldShowSelfPreviewTile = computed(() => {
 const cameraTileClass = (tile) => {
   if (!tile?.isLocal) return 'min-w-0';
 
-  if (!hasMainShare.value) return 'min-w-0';
+  if (!hasMainDisplay.value) return 'min-w-0';
 
   return 'min-w-0 w-3/4 justify-self-start sm:w-2/3 lg:w-full lg:max-w-[180px]';
 };
@@ -189,6 +248,146 @@ const mountTileElement = (host, tile, mode = 'camera') => {
   }
 };
 
+const closeParticipantMenu = () => {
+  if (!participantMenu.value.visible) return;
+  participantMenu.value = {
+    ...participantMenu.value,
+    visible: false,
+    volumeOpen: false,
+  };
+};
+
+const updateMobileViewport = () => {
+  if (typeof window === 'undefined') return;
+  isMobileViewport.value = window.matchMedia('(max-width: 767px)').matches;
+};
+
+const openParticipantMenuWithTile = (tile, options = {}) => {
+  if (!tile?.memberId) return;
+  const {
+    x = 0,
+    y = 0,
+    volumeOpen = false,
+  } = options;
+
+  participantMenu.value = {
+    visible: true,
+    x,
+    y,
+    memberId: tile.memberId,
+    pubId: tile.pubId || '',
+    isLocal: !!tile.isLocal,
+    volumeOpen: !tile.isLocal && volumeOpen,
+  };
+};
+
+const openParticipantMenu = (event, tile) => {
+  if (isMobileViewport.value) return;
+  openParticipantMenuWithTile(tile, {
+    x: event?.clientX ?? 0,
+    y: event?.clientY ?? 0,
+  });
+};
+
+const openParticipantMenuFromButton = (event, tile) => {
+  if (isMobileViewport.value) {
+    openParticipantMenuWithTile(tile, {
+      volumeOpen: !tile?.isLocal,
+    });
+    return;
+  }
+
+  const rect = event?.currentTarget?.getBoundingClientRect?.();
+  const estimatedMenuWidth = 180;
+  let x = rect ? rect.right - estimatedMenuWidth : (event?.clientX ?? 0);
+  let y = rect ? rect.bottom + 4 : (event?.clientY ?? 0);
+  if (typeof window !== 'undefined') {
+    const maxX = window.innerWidth - estimatedMenuWidth - 8;
+    const maxY = window.innerHeight - 8;
+    x = Math.min(Math.max(8, x), Math.max(8, maxX));
+    y = Math.min(Math.max(8, y), Math.max(8, maxY));
+  }
+
+  openParticipantMenuWithTile(tile, {
+    x: Math.round(x),
+    y: Math.round(y),
+  });
+};
+
+const pinParticipantAsMain = () => {
+  if (hasShareTiles.value || !participantMenu.value.memberId) return;
+  selectedMainCameraMemberId.value = participantMenu.value.memberId;
+  closeParticipantMenu();
+};
+
+const clearMainParticipant = () => {
+  selectedMainCameraMemberId.value = null;
+  closeParticipantMenu();
+};
+
+const toggleVolumeMenu = () => {
+  if (participantMenu.value.isLocal) return;
+  participantMenu.value = {
+    ...participantMenu.value,
+    volumeOpen: !participantMenu.value.volumeOpen,
+  };
+};
+
+const handleMenuVolumeInput = (event) => {
+  if (participantMenu.value.isLocal) return;
+  const nextVolume = Number(event?.target?.value ?? 100);
+  setRemoteParticipantVolume(participantMenu.value.memberId, nextVolume);
+};
+
+const handleGlobalPointerDown = (event) => {
+  if (!participantMenu.value.visible) return;
+  if (event?.target?.closest?.('[data-participant-menu="1"]')) return;
+  closeParticipantMenu();
+};
+
+const handleWindowResize = () => {
+  updateMobileViewport();
+  closeParticipantMenu();
+};
+
+watch(hasShareTiles, (value) => {
+  if (!value) return;
+  selectedMainCameraMemberId.value = null;
+  closeParticipantMenu();
+});
+
+watch(cameraFilmstripTiles, (tiles) => {
+  const currentMemberIds = new Set(tiles.map((tile) => tile.memberId));
+  if (
+    selectedMainCameraMemberId.value &&
+    !currentMemberIds.has(selectedMainCameraMemberId.value)
+  ) {
+    selectedMainCameraMemberId.value = null;
+  }
+
+  if (
+    participantMenu.value.visible &&
+    participantMenu.value.pubId !== 'local-self-preview' &&
+    participantMenu.value.memberId &&
+    !currentMemberIds.has(participantMenu.value.memberId)
+  ) {
+    closeParticipantMenu();
+  }
+});
+
+onMounted(() => {
+  updateMobileViewport();
+  window.addEventListener('pointerdown', handleGlobalPointerDown);
+  window.addEventListener('resize', handleWindowResize);
+  window.addEventListener('scroll', closeParticipantMenu, true);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('pointerdown', handleGlobalPointerDown);
+  window.removeEventListener('resize', handleWindowResize);
+  window.removeEventListener('scroll', closeParticipantMenu, true);
+});
+
 // room 参加中に別 route へ遷移する前に leave を完了し、同名再入室時の重複エラーを防ぐ。
 onBeforeRouteLeave(async () => {
   if (!props.requiresLeaveOnBack || !joined.value) {
@@ -202,7 +401,6 @@ onBeforeRouteLeave(async () => {
 
 <template>
   <div class="p-4 space-y-4">
-    <div v-if="enlargedVideo" @click="shrinkVideo" class="fixed inset-0 bg-transparent z-40 cursor-pointer" />
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur px-3 py-2 shadow-sm">
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="flex items-center gap-2">
@@ -283,6 +481,27 @@ onBeforeRouteLeave(async () => {
             </button>
             <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainShareTile, 'main')" />
           </div>
+          <div
+            v-else-if="hasMainCamera && selectedMainCameraTile"
+            class="border rounded p-2 md:p-3 bg-gray-50 relative"
+            @contextmenu.prevent="openParticipantMenu($event, selectedMainCameraTile)"
+          >
+            <button
+              type="button"
+              class="absolute top-2 right-12 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+              @click.stop="openParticipantMenuFromButton($event, selectedMainCameraTile)"
+            >
+              ⋮
+            </button>
+            <button
+              type="button"
+              class="absolute top-2 right-2 z-10 px-2 py-1 rounded bg-black/60 text-white text-xs hover:bg-black/70"
+              @click="clearMainParticipant"
+            >
+              閉じる
+            </button>
+            <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, selectedMainCameraTile, 'main')" />
+          </div>
 
           <div v-if="shouldShowShareList" class="space-y-2">
             <div class="text-xs text-gray-600">共有サムネイル</div>
@@ -327,17 +546,161 @@ onBeforeRouteLeave(async () => {
         <div :class="cameraAreaClass">
           <div class="text-xs text-gray-600">参加者カメラ</div>
           <div :class="['grid gap-2 pb-1', cameraGridClass]">
-            <div v-if="shouldShowSelfPreviewTile" :class="cameraTileClass({ isLocal: true })">
+            <div
+              v-if="shouldShowSelfPreviewTile"
+              :class="cameraTileClass({ isLocal: true })"
+              @contextmenu.prevent="openParticipantMenu($event, localSelfPreviewMenuTile)"
+            >
               <div class="relative w-full aspect-video bg-black rounded overflow-hidden border border-white/30">
+                <button
+                  type="button"
+                  class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+                  @click.stop="openParticipantMenuFromButton($event, localSelfPreviewMenuTile)"
+                >
+                  ⋮
+                </button>
                 <video ref="localSelfCameraPreviewEl" autoplay playsinline muted class="w-full h-full object-cover" />
+                <span
+                  v-if="isAudioMuted"
+                  class="absolute bottom-2 right-2 bg-black/60 text-white px-1.5 py-0.5 rounded text-xs pointer-events-none"
+                >
+                  🔇
+                </span>
               </div>
               <div class="mt-1 text-xs text-gray-600">あなた</div>
             </div>
-            <div v-for="tile in cameraFilmstripTiles" :key="`camera-${tile.pubId}`" :class="cameraTileClass(tile)">
-              <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+            <div
+              v-for="tile in cameraTilesForList"
+              :key="`camera-${tile.pubId}`"
+              :class="cameraTileClass(tile)"
+              @contextmenu.prevent="openParticipantMenu($event, tile)"
+            >
+              <div class="relative">
+                <button
+                  type="button"
+                  class="absolute top-2 right-2 z-10 h-7 w-7 rounded-full bg-black/55 text-white text-sm leading-none hover:bg-black/70"
+                  @click.stop="openParticipantMenuFromButton($event, tile)"
+                >
+                  ⋮
+                </button>
+                <div class="relative w-full aspect-video bg-black rounded overflow-hidden" :ref="(el) => mountTileElement(el, tile, 'camera')" />
+              </div>
               <div class="mt-1 text-xs text-gray-600">{{ tile.label }}</div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div
+        v-if="participantMenu.visible && !isMobileViewport"
+        data-participant-menu="1"
+        class="fixed z-50 min-w-[180px] rounded border bg-white shadow-lg"
+        :style="{ left: `${participantMenu.x}px`, top: `${participantMenu.y}px` }"
+      >
+        <button
+          v-if="!hasShareTiles && !isMenuTargetMainCamera"
+          type="button"
+          class="block w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+          @click="pinParticipantAsMain"
+        >
+          主表示にする
+        </button>
+        <button
+          v-if="!hasShareTiles && isMenuTargetMainCamera"
+          type="button"
+          class="block w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+          @click="clearMainParticipant"
+        >
+          主表示を解除
+        </button>
+        <div
+          v-if="participantMenu.isLocal && hasShareTiles"
+          class="px-3 py-2 text-xs text-gray-500"
+        >
+          共有中は主表示を変更できません
+        </div>
+        <button
+          v-if="!participantMenu.isLocal"
+          type="button"
+          class="block w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+          @click="toggleVolumeMenu"
+        >
+          音量を調整
+        </button>
+        <div v-if="!participantMenu.isLocal && participantMenu.volumeOpen" class="border-t px-3 py-2 space-y-1">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="currentMenuVolume"
+            class="w-full"
+            @input="handleMenuVolumeInput"
+          />
+          <div class="text-[11px] text-gray-500">{{ currentMenuVolume }}%</div>
+        </div>
+      </div>
+
+      <div
+        v-if="participantMenu.visible && isMobileViewport"
+        class="fixed inset-0 z-50 bg-black/35"
+        @click="closeParticipantMenu"
+      >
+        <div
+          data-participant-menu="1"
+          class="absolute inset-x-0 bottom-0 rounded-t-2xl bg-white px-4 pt-3 pb-5 shadow-2xl space-y-2"
+          @click.stop
+        >
+          <div class="mx-auto h-1.5 w-10 rounded-full bg-gray-300" />
+          <button
+            v-if="!hasShareTiles && !isMenuTargetMainCamera"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="pinParticipantAsMain"
+          >
+            主表示にする
+          </button>
+          <button
+            v-if="!hasShareTiles && isMenuTargetMainCamera"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="clearMainParticipant"
+          >
+            主表示を解除
+          </button>
+          <div
+            v-if="hasShareTiles"
+            class="px-3 py-2 text-xs text-gray-500"
+          >
+            共有中は主表示を変更できません
+          </div>
+          <button
+            v-if="!participantMenu.isLocal"
+            type="button"
+            class="block w-full rounded px-3 py-3 text-left text-sm hover:bg-gray-50"
+            @click="toggleVolumeMenu"
+          >
+            音量を調整
+          </button>
+          <div v-if="shouldShowMobileVolumeSection && participantMenu.volumeOpen" class="rounded border px-3 py-3 space-y-2">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              :value="currentMenuVolume"
+              class="w-full"
+              @input="handleMenuVolumeInput"
+            />
+            <div class="text-xs text-gray-500">{{ currentMenuVolume }}%</div>
+          </div>
+          <button
+            type="button"
+            class="mt-1 block w-full rounded border px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+            @click="closeParticipantMenu"
+          >
+            閉じる
+          </button>
         </div>
       </div>
 

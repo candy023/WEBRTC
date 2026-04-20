@@ -13,8 +13,8 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import {
   setRemoteAudioOutput,
-  enlargeVideo as uiEnlarge,
-  shrinkVideo as uiShrink
+  setRemoteParticipantVolume as setRemoteParticipantVolumeOnElement,
+  setLocalAudioMuteBadgeVisible,
 } from '../services/VideoUIService.js';
 import {
   buildSkywayMemberName,
@@ -57,13 +57,13 @@ export function useStreamReceiver() {
   const isBackgroundBlurred = ref(false);    // 背景ぼかしが有効かどうか
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
-  const enlargedVideo = ref(null);           // 現在拡大表示されている video 要素
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
   const audioNoiseSuppressionMode = ref('suppressor'); // ノイズ抑制モード（現状は standard/suppressor のみ）
   // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
   const memberDisplayName = ref('');
   // SkyWay join 専用の内部名。`profiles.nickname` と分離して member.name 制約を満たす。
   const memberJoinName = ref('');
+  const remoteParticipantVolumes = ref({});
 
   // --- 内部制御用（UI には直接返さない） ---
   const localVideoPublication = ref(null);   // 自分の映像 Publication
@@ -72,14 +72,33 @@ export function useStreamReceiver() {
   const localSelfCameraPreviewStream = ref(null); // プレビュー専用のローカルカメラ stream。切替時の解放に使う
   const context = { ctx: null, room: null }; // SkyWay Context と Room の保持
 
-  const handleLocalTileEnlarge = (videoEl) => {
-    try {
-      uiEnlarge(videoEl);
-      enlargedVideo.value = videoEl;
-    } catch {}
-  };
+  const handleLocalTileEnlarge = () => {};
 
   // 各 sub composable からの失敗を UI 表示用 state に集約する callback。
+  const normalizeVolumePercent = (volumePercent) => {
+    const numeric = Number(volumePercent);
+    if (!Number.isFinite(numeric)) return 100;
+    if (numeric < 0) return 0;
+    if (numeric > 100) return 100;
+    return Math.round(numeric);
+  };
+
+  const getRemoteParticipantVolume = (memberId) => {
+    if (!memberId) return 100;
+    return normalizeVolumePercent(remoteParticipantVolumes.value[memberId]);
+  };
+
+  const setRemoteParticipantVolume = (memberId, volumePercent) => {
+    if (!memberId) return;
+
+    const normalized = normalizeVolumePercent(volumePercent);
+    remoteParticipantVolumes.value = {
+      ...remoteParticipantVolumes.value,
+      [memberId]: normalized,
+    };
+    setRemoteParticipantVolumeOnElement(streamArea.value, memberId, normalized);
+  };
+
   const setErrorMessage = (message) => {
     errorMessage.value = message;
   };
@@ -179,6 +198,11 @@ export function useStreamReceiver() {
     onSpeakerSelectionConfirmed,
   });
 
+  const handleRemoteAudioAttached = (memberId, stream) => {
+    startSpeakingMonitor(memberId, stream);
+    if (!memberId) return;
+    setRemoteParticipantVolume(memberId, getRemoteParticipantVolume(memberId));
+  };
   // remote publication / remote tile 管理を担当する sub composable。orchestrator 側は高レベルフロー制御に専念する。
   const {
     // 生成済み remote 要素配列。leave 時の一括 cleanup と fallback 探索に使う。
@@ -217,7 +241,7 @@ export function useStreamReceiver() {
     // mute badge 再同期時に publication 一覧を参照するための room getter。
     getCurrentRoom: () => context.room,
     // remote audio attach 完了時に memberId ごとの話者監視を開始する callback。
-    onRemoteAudioAttached: startSpeakingMonitor,
+    onRemoteAudioAttached: handleRemoteAudioAttached,
     // remote audio publication 削除時に memberId ごとの話者監視を停止する callback。
     onRemoteAudioPublicationRemoved: stopSpeakingMonitor,
   });
@@ -257,6 +281,16 @@ export function useStreamReceiver() {
   });
 
   // ローカルメディア操作（画面共有/背景ぼかし/ローカルプレビュー）の委譲先。
+  const syncLocalAudioMuteBadge = () => {
+    const { containerEl } = getLocalTileElements();
+    setLocalAudioMuteBadgeVisible(containerEl, isAudioMuted.value);
+  };
+
+  const syncLocalVideoTileAndMuteState = () => {
+    syncLocalVideoTile();
+    syncLocalAudioMuteBadge();
+  };
+
   const localMediaSessionHandlers = useLocalMediaSession({
     joined,
     localMember,
@@ -271,7 +305,7 @@ export function useStreamReceiver() {
     isVideoMuted,
     setErrorMessage,
     removeTileByPubId,
-    syncLocalVideoTile,
+    syncLocalVideoTile: syncLocalVideoTileAndMuteState,
     updateLocalVideoPublicationMetadata,
     releaseLocalVideoStream,
     getBlurProcessor,
@@ -365,7 +399,7 @@ export function useStreamReceiver() {
     // local video publication metadata を更新する callback。
     updateLocalVideoPublicationMetadata,
     // local tile を publish 状態に合わせて再同期する callback。
-    syncLocalVideoTile,
+    syncLocalVideoTile: syncLocalVideoTileAndMuteState,
     // leave 時に画面共有中 self preview を停止する callback。
     stopLocalSelfCameraPreview,
     // leave 時に remote publication/tile/DOM を初期化する callback。
@@ -404,6 +438,8 @@ export function useStreamReceiver() {
       }
     } catch (e) {
       errorMessage.value = e?.message || String(e);
+    } finally {
+      syncLocalAudioMuteBadge();
     }
   };
 
@@ -482,33 +518,6 @@ export function useStreamReceiver() {
     }
   };
 
-  // 映像を全画面表示する
-  /**
-   * 指定 video 要素を全画面オーバーレイ表示へ移す。
-   *
-   * @param {HTMLVideoElement} videoEl
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects DOM 再配置と enlargedVideo の更新を行う。
-   */
-  const enlargeVideo = (videoEl) => {
-    uiEnlarge(videoEl);
-    enlargedVideo.value = videoEl;
-  };
-
-  // 全画面表示を解除する
-  /**
-   * 全画面オーバーレイ表示を解除する。
-   *
-   * @returns {void}
-   * @throws {never}
-   * @sideeffects DOM 復元と enlargedVideo の初期化を行う。
-   */
-  const shrinkVideo = () => {
-    uiShrink(enlargedVideo.value);
-    enlargedVideo.value = null;
-  };
-
   // 初期化処理（デバイス取得・URL クエリ反映）
   onMounted(async () => {
     await loadMemberDisplayName();
@@ -550,7 +559,6 @@ export function useStreamReceiver() {
     isBackgroundBlurred,
     showShareOpen,
     showSettingsOpen,
-    enlargedVideo,
     videoInputDevices,
     audioInputDevices,
     audioOutputDevices,
@@ -582,7 +590,7 @@ export function useStreamReceiver() {
     openSpeakerPanel,
     cancelSpeakerPanel,
     confirmSpeakerPanel,
-    enlargeVideo,
-    shrinkVideo,
+    getRemoteParticipantVolume,
+    setRemoteParticipantVolume,
   };
 }

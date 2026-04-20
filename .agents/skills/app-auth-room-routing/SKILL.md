@@ -1,6 +1,6 @@
 ---
 name: app-auth-room-routing
-description: ログイン画面、部屋選択画面、部屋画面の 3 段フローを認証付きで実装するときに使う。/login から /rooms、さらに /rooms/:slug へ進む route 設計、guard 集約、WorkRoomView での WebRTC_UI.vue 再利用、PokerRoomView 分離を最小差分で行う。
+description: ログイン画面、部屋選択画面、部屋画面の 3 段フローを認証付きで実装・拡張するときに使う。/login から /rooms、さらに /rooms/:slug へ進む route 設計、guard 集約、LoginView の複数認証手段、WorkRoomView での WebRTC_UI.vue 再利用、PokerRoomView 分離を最小差分で行う。
 ---
 
 # app-auth-room-routing
@@ -40,6 +40,7 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - fixed room view から `部屋を作成` UI を取り除きたい
 - room 画面から lobby へ戻るときに leave を必須化したい
 - 表示用 nickname と SkyWay join 用内部名の受け渡しを整理したい
+- LoginView に複数認証手段を並べたい
 
 ## Do not use this skill when
 
@@ -71,11 +72,16 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - fixed room アプリの room view に `部屋を作成` UI を残さない
 - room 画面から lobby へ戻るときは、単なる route push だけで戻さない
 - `profiles.nickname` をそのまま SkyWay join 名に渡さない
+- LoginView の provider 追加のために router 全体を大きく組み替えない
+- Email OTP は LoginView 内で code 入力型として完結させてよい
+- OAuth callback 用の追加 route は必要時のみ最小で追加する
 
 ## Recommended routes
 
 - `/login`
+  - Discord ログインボタン
   - Google ログインボタン
+  - Email OTP 入力導線
 - `/rooms`
   - 作業部屋 / ポーカー部屋の選択
   - nickname 未設定時の入力導線
@@ -99,6 +105,13 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 
 - ログインだけに集中する
 - 余計な部屋情報を出さない
+- 認証手段は複数並べてよい
+- 優先順は `Discord -> Google -> Email OTP` を既定とする
+- Email OTP は同一画面内で次の流れを完結させてよい
+  - メール入力
+  - OTP 送信
+  - コード入力
+  - OTP 検証
 
 ### RoomSelectView
 
@@ -120,6 +133,34 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - 初期段階では薄い shell でよい
 - fixed room に入るための `参加` 導線を持つ
 - fixed room view では `部屋を作成` UI を出さない
+
+## LoginView auth provider policy
+
+### Supported methods
+
+- Discord OAuth
+- Google OAuth
+- Email OTP
+
+### Ordering policy
+
+- 認証手段の表示順は `Discord -> Google -> Email OTP` を既定とする
+- 利用者導線の優先順位は LoginView 上の並びで表現してよい
+- provider 追加のために RoomSelectView や room view の責務へ広げない
+
+### Email OTP behavior
+
+- Email OTP は code 入力型を基本とする
+- LoginView 内で送信と検証を完結させてよい
+- OTP 送信後は別画面へ飛ばさず、同一画面で code 入力欄を出してよい
+- LoginView は provider ごとの違いを見せても、ログイン成功後の遷移先は共通で `/rooms` に揃える
+
+### Redirect behavior
+
+- OAuth 成功後の戻り先は `/rooms` を基本とする
+- `redirect` query がある場合はそれを尊重してよい
+- callback route を追加する場合も、最終的には `/rooms` または元の protected route へ戻す
+- Email OTP は callback route を必須前提にしない
 
 ## Nickname gate policy
 
@@ -194,11 +235,34 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - room view では nickname / fixed room / join 準備が整った状態から参加する
 - room view へ来た後にランダム room を新規作成する導線を増やさない
 
+## Auth state routing policy
+
+### Guest only route
+
+- `/login` は guestOnly route として扱ってよい
+- ログイン済み user が `/login` へ来た場合は `/rooms` へ戻してよい
+
+### Protected routes
+
+- `/rooms`
+- `/rooms/work`
+- `/rooms/poker`
+
+これらは requiresAuth route として扱う。
+未ログイン時は `/login` へ戻してよい。
+
+### Redirect query
+
+- 未ログイン user が protected route へ来た場合、`redirect` query に元の path を保持してよい
+- ログイン成功後は `redirect` を優先して戻してよい
+- `redirect` が無い場合は `/rooms` を基本戻り先とする
+
 ## Do not touch unless explicitly required
 
 - SkyWay service / composable の内部実装
 - Supabase schema / SQL の詳細
 - WebRTC_UI.vue の大規模 UI 改修
+- Discord / Google / Email OTP の低レベル実装詳細
 
 ## Verification checklist
 
@@ -211,7 +275,10 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 
 ## Verification checklist addendum
 
-- ログイン後に `/rooms` へ進める
+- `/login` に Discord / Google / Email OTP が並ぶ
+- Discord ログイン成功後に `/rooms` へ進める
+- Google ログイン成功後に `/rooms` へ進める
+- Email OTP 検証成功後に `/rooms` へ進める
 - nickname 未設定時は RoomSelectView で入力が必須になる
 - nickname 未設定のまま room 画面へ進めない
 - nickname 保存後に room 選択が有効になる
@@ -233,13 +300,16 @@ Supabase の中身や WebRTC の media ロジックは主担当ではない。
 - fixed room view なのに createRoom UI を残す
 - room 参加中の戻る導線を route push だけで済ませる
 - `profiles.nickname` をそのまま SkyWay join 名に使う
+- Email OTP のために LoginView を複数 route に分解しすぎる
+- provider 追加のために guard ロジックを複数箇所へ分散する
 
 ## Prompt template
 
-この skill を使って、ログイン画面、部屋選択画面、部屋画面の routing を最小差分で追加してください。
+この skill を使って、ログイン画面、部屋選択画面、部屋画面の routing を最小差分で追加・拡張してください。
 ルーティングと view 導線に責務を限定し、Supabase の基盤実装や WebRTC の内部ロジックには広げないでください。
-また、RoomSelectView で nickname 未設定時の入力必須化、表示用 nickname と SkyWay join 用内部名の分離、fixed room view の enter-only 化、`部屋一覧へ戻る` での leave 必須化を守ってください。
+また、LoginView では Discord / Google / Email OTP を扱い、Email OTP は code 入力型として同一画面で完結させてください。
+RoomSelectView で nickname 未設定時の入力必須化、表示用 nickname と SkyWay join 用内部名の分離、fixed room view の enter-only 化、`部屋一覧へ戻る` での leave 必須化を守ってください。
 
 ## Do not expand scope
 
-この skill で Supabase schema 実装、room_kind policy 実装、Poker state 同期、WebRTC core の改造まで広げない。
+この skill で Supabase schema 実装、provider の低レベル service 実装、room_kind policy 実装、Poker state 同期、WebRTC core の改造まで広げない。
