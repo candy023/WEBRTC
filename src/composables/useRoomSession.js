@@ -56,7 +56,7 @@ const normalizeMemberJoinName = (memberJoinName) => {
  * @param {import('vue').Ref<boolean>} params.isVideoMuted ローカル映像 mute state。
  * @param {import('vue').Ref<boolean>} params.isScreenSharing 画面共有 state。
  * @param {import('vue').Ref<boolean>} params.isBackgroundBlurred 背景ぼかし state。
- * @param {import('vue').Ref<boolean>} params.isRnnoiseEnabled RNNoise 有効 state。
+ * @param {import('vue').Ref<string>} params.audioNoiseSuppressionMode 音声ノイズ抑制モード state。
  * @param {import('vue').Ref<string>} params.selectedVideoInputId 選択済み camera deviceId。
  * @param {import('vue').Ref<string>} params.selectedAudioInputId 選択済み mic deviceId。
  * @param {import('vue').Ref<string>} params.memberDisplayName room join 時に使う表示名。
@@ -105,7 +105,7 @@ export function useRoomSession({
   isVideoMuted,
   isScreenSharing,
   isBackgroundBlurred,
-  isRnnoiseEnabled,
+  audioNoiseSuppressionMode,
   selectedVideoInputId,
   selectedAudioInputId,
   memberDisplayName,
@@ -175,8 +175,9 @@ export function useRoomSession({
     };
 
     // join 中に生成した suppressor リソースを leave/join 失敗 cleanup へ渡すハンドル。
+    const selectedAudioNoiseSuppressionMode = audioNoiseSuppressionMode.value;
     const nextRnnoiseHandle = await setupRnnoise(selectedAudioInputId.value, {
-      enabled: isRnnoiseEnabled.value,
+      mode: selectedAudioNoiseSuppressionMode,
     });
 
     if (nextRnnoiseHandle?.audioStream) {
@@ -191,10 +192,10 @@ export function useRoomSession({
       audioConstraints = nextRnnoiseHandle.constraints;
     }
 
-    if (isRnnoiseEnabled.value) {
+    if (selectedAudioNoiseSuppressionMode === 'suppressor') {
       console.info('[audio] join/createLocalAudioStream: suppressor unavailable, using browser-standard microphone path');
     } else {
-      console.info('[audio] join/createLocalAudioStream: suppressor disabled, using browser-standard microphone path');
+      console.info(`[audio] join/createLocalAudioStream: mode=${selectedAudioNoiseSuppressionMode}, using browser-standard microphone path`);
     }
 
     const audioStream = await createMicrophoneStream(audioConstraints);

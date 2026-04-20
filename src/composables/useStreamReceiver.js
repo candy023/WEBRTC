@@ -58,7 +58,7 @@ export function useStreamReceiver() {
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
-  const isRnnoiseEnabled = ref(true);        // RNNoise を有効にするか（初期は ON）
+  const audioNoiseSuppressionMode = ref('suppressor'); // ノイズ抑制モード（現状は standard/suppressor のみ）
   // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
   const memberDisplayName = ref('');
   // SkyWay join 専用の内部名。`profiles.nickname` と分離して member.name 制約を満たす。
@@ -364,8 +364,8 @@ export function useStreamReceiver() {
     isScreenSharing,
     // 背景ぼかし state。join 後の blur 再適用可否判定に使う。
     isBackgroundBlurred,
-    // RNNoise を join 時に有効化するかの判定 state。
-    isRnnoiseEnabled,
+    // join 時の音声ノイズ抑制モード。
+    audioNoiseSuppressionMode,
     // camera stream 生成時に使う選択済み deviceId。
     selectedVideoInputId,
     // mic stream 生成時に使う選択済み deviceId。
@@ -494,24 +494,26 @@ export function useStreamReceiver() {
     await localMediaSessionHandlers.toggleBackgroundBlur();
   };
 
-  // RNNoise の有効 / 無効を切り替える
+  // ノイズ抑制モード（standard / suppressor）を切り替える
   /**
-   * RNNoise 利用フラグを切り替える。
+   * ノイズ抑制モードを切り替える。
    *
    * @returns {Promise<void>}
    * @throws {never}
-   * @sideeffects isRnnoiseEnabled を更新する。
+   * @sideeffects audioNoiseSuppressionMode を更新する。
    */
   const toggleRnnoise = async () => {
-    const prevRnnoiseEnabled = isRnnoiseEnabled.value;
-    isRnnoiseEnabled.value = !prevRnnoiseEnabled;
+    const prevAudioNoiseSuppressionMode = audioNoiseSuppressionMode.value;
+    audioNoiseSuppressionMode.value = prevAudioNoiseSuppressionMode === 'suppressor'
+      ? 'standard'
+      : 'suppressor';
 
     if (!joined.value) return;
 
     try {
       await replaceLocalAudioForRnnoiseToggle();
     } catch (e) {
-      isRnnoiseEnabled.value = prevRnnoiseEnabled;
+      audioNoiseSuppressionMode.value = prevAudioNoiseSuppressionMode;
       errorMessage.value = e?.message || String(e);
     }
   };
@@ -570,8 +572,7 @@ export function useStreamReceiver() {
     tempSelectedAudioInputId,
     tempSelectedAudioOutputId,
     baseUrl,
-    isRnnoiseEnabled,
-    remoteParticipantVolumes,
+    audioNoiseSuppressionMode,
     createRoom,
     joinRoom,
     leaveRoom,
