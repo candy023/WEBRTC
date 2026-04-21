@@ -58,7 +58,7 @@ export function useStreamReceiver() {
   const showShareOpen = ref(false);          // URL 共有パネルの表示状態
   const showSettingsOpen = ref(false);       // 設定パネルの表示状態
   const baseUrl = window.location.href.split('?')[0]; // 共有用のベース URL
-  const audioNoiseSuppressionMode = ref('suppressor'); // ノイズ抑制モード（現状は standard/suppressor のみ）
+  const audioNoiseSuppressionMode = ref('suppressor'); // ノイズ抑制モード（standard/suppressor/rnnoise）
   // room 参加後に UI タイルへ表示する名前。正本は `profiles.nickname` として扱う。
   const memberDisplayName = ref('');
   // SkyWay join 専用の内部名。`profiles.nickname` と分離して member.name 制約を満たす。
@@ -494,7 +494,7 @@ export function useStreamReceiver() {
     await localMediaSessionHandlers.toggleBackgroundBlur();
   };
 
-  // ノイズ抑制モード（standard / suppressor）を切り替える
+  // ノイズ抑制モード（standard / suppressor / rnnoise）を切り替える
   /**
    * ノイズ抑制モードを切り替える。
    *
@@ -503,10 +503,14 @@ export function useStreamReceiver() {
    * @sideeffects audioNoiseSuppressionMode を更新する。
    */
   const toggleRnnoise = async () => {
+    // 現在モードから次モードを一意に決める遷移表。UI と service の mode enum を揃える。
+    const nextAudioNoiseSuppressionModeByCurrentMode = {
+      standard: 'suppressor',
+      suppressor: 'rnnoise',
+      rnnoise: 'standard',
+    };
     const prevAudioNoiseSuppressionMode = audioNoiseSuppressionMode.value;
-    audioNoiseSuppressionMode.value = prevAudioNoiseSuppressionMode === 'suppressor'
-      ? 'standard'
-      : 'suppressor';
+    audioNoiseSuppressionMode.value = nextAudioNoiseSuppressionModeByCurrentMode[prevAudioNoiseSuppressionMode] || 'standard';
 
     if (!joined.value) return;
 

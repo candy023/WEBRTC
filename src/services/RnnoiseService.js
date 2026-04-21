@@ -1,10 +1,20 @@
 import { LocalAudioStream } from '@skyway-sdk/room';
-import { SpeexWorkletNode, loadSpeex } from '@sapphi-red/web-noise-suppressor';
+import {
+  RnnoiseWorkletNode,
+  SpeexWorkletNode,
+  loadRnnoise,
+  loadSpeex
+} from '@sapphi-red/web-noise-suppressor';
+import rnnoiseWorkletPath from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url';
+import rnnoiseWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url';
+import rnnoiseSimdWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url';
 import speexWorkletPath from '@sapphi-red/web-noise-suppressor/speexWorklet.js?url';
 import speexWasmPath from '@sapphi-red/web-noise-suppressor/speex.wasm?url';
 
 // Speex suppressor はローカル音声 publish 経路を単一チャネルで処理する。
 const SUPPRESSOR_MAX_CHANNELS = 1;
+// RNNoise も同様に単一チャネルで処理し、既存 publish 経路との整合を保つ。
+const RNNOISE_MAX_CHANNELS = 1;
 // suppressor 経路でのみ使う前段 high-pass filter の固定初期値。
 const SUPPRESSOR_HIGHPASS_TYPE = 'highpass';
 const SUPPRESSOR_HIGHPASS_FREQUENCY_HZ = 120;
@@ -76,10 +86,13 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
   const resolvedMode = normalizeAudioNoiseSuppressionMode(
     mode ?? (enabled ? 'suppressor' : 'standard')
   );
-  const suppressorEnabled = resolvedMode === 'suppressor';
+  // mode ごとの処理経路判定。worklet 経路のときだけ processedTrack を生成する。
+  const useSuppressorPath = resolvedMode === 'suppressor';
+  const useRnnoisePath = resolvedMode === 'rnnoise';
+  const useWorkletPath = useSuppressorPath || useRnnoisePath;
 
   const constraints = {
-    audio: suppressorEnabled
+    audio: useWorkletPath
       ? createSuppressorAudioConstraints(audioDeviceId)
       : createStandardAudioConstraints(audioDeviceId),
   };
@@ -87,12 +100,12 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     audio: createStandardAudioConstraints(audioDeviceId),
   });
 
-  if (!suppressorEnabled) {
+  if (!useWorkletPath) {
     return fallbackResult;
   }
 
   if (!isWebNoiseSuppressorSupported()) {
-    console.warn('[audio] web-noise-suppressor unsupported, fallback to browser-standard microphone path');
+    console.warn(`[audio] ${resolvedMode} unsupported, fallback to browser-standard microphone path`);
     return fallbackResult;
   }
 
@@ -101,7 +114,8 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
   let audioContext = null;
   let sourceNode = null;
   let highPassNode = null;
-  let suppressorNode = null;
+  // speex / rnnoise の処理ノード参照。cleanup で disconnect/destroy を行う。
+  let processorNode = null;
   let destinationNode = null;
   let processedTrack = null;
   let cleaned = false;
@@ -120,7 +134,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     } catch {}
 
     try {
-      suppressorNode?.disconnect?.();
+      processorNode?.disconnect?.();
     } catch {}
 
     try {
@@ -128,7 +142,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     } catch {}
 
     try {
-      suppressorNode?.destroy?.();
+      processorNode?.destroy?.();
     } catch {}
 
     try {
@@ -156,23 +170,43 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     audioContext = new AudioContextCtor({ latencyHint: 'interactive' });
 
-    const wasmBinary = await loadSpeex({ url: speexWasmPath });
-    await audioContext.audioWorklet.addModule(speexWorkletPath);
-
     sourceNode = audioContext.createMediaStreamSource(rawStream);
-    highPassNode = audioContext.createBiquadFilter();
-    highPassNode.type = SUPPRESSOR_HIGHPASS_TYPE;
-    highPassNode.frequency.value = SUPPRESSOR_HIGHPASS_FREQUENCY_HZ;
-    highPassNode.Q.value = SUPPRESSOR_HIGHPASS_Q;
-    suppressorNode = new SpeexWorkletNode(audioContext, {
-      maxChannels: SUPPRESSOR_MAX_CHANNELS,
-      wasmBinary,
-    });
     destinationNode = audioContext.createMediaStreamDestination();
 
-    sourceNode.connect(highPassNode);
-    highPassNode.connect(suppressorNode);
-    suppressorNode.connect(destinationNode);
+    if (useSuppressorPath) {
+      const speexWasmBinary = await loadSpeex({ url: speexWasmPath });
+      await audioContext.audioWorklet.addModule(speexWorkletPath);
+
+      highPassNode = audioContext.createBiquadFilter();
+      highPassNode.type = SUPPRESSOR_HIGHPASS_TYPE;
+      highPassNode.frequency.value = SUPPRESSOR_HIGHPASS_FREQUENCY_HZ;
+      highPassNode.Q.value = SUPPRESSOR_HIGHPASS_Q;
+      processorNode = new SpeexWorkletNode(audioContext, {
+        maxChannels: SUPPRESSOR_MAX_CHANNELS,
+        wasmBinary: speexWasmBinary,
+      });
+
+      sourceNode.connect(highPassNode);
+      highPassNode.connect(processorNode);
+    } else if (useRnnoisePath) {
+      const rnnoiseWasmBinary = await loadRnnoise({
+        url: rnnoiseWasmPath,
+        simdUrl: rnnoiseSimdWasmPath,
+      });
+      await audioContext.audioWorklet.addModule(rnnoiseWorkletPath);
+
+      processorNode = new RnnoiseWorkletNode(audioContext, {
+        maxChannels: RNNOISE_MAX_CHANNELS,
+        wasmBinary: rnnoiseWasmBinary,
+      });
+
+      sourceNode.connect(processorNode);
+    } else {
+      await releaseCreatedResources();
+      return fallbackResult;
+    }
+
+    processorNode.connect(destinationNode);
 
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
@@ -198,7 +232,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
       originalTrack,
       processedTrack,
       denoisedTrack: processedTrack,
-      processor: suppressorNode,
+      processor: processorNode,
       audioStream: new LocalAudioStream(processedTrack, {
         stopTrackWhenDisabled: false,
       }),
@@ -208,7 +242,7 @@ export async function setupRnnoise(audioDeviceId, options = {}) {
       }
     };
   } catch (error) {
-    console.warn('[audio] web-noise-suppressor init failed. fallback to browser-standard microphone path:', error);
+    console.warn(`[audio] ${resolvedMode} init failed. fallback to browser-standard microphone path:`, error);
     await releaseCreatedResources();
     return fallbackResult;
   }
