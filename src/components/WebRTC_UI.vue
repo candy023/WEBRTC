@@ -413,7 +413,7 @@ onBeforeRouteLeave(async () => {
           <button @click="toggleVideoMute" :title="isVideoMuted ? 'カメラをオン' : 'カメラをオフ'" :class="['px-3 py-1.5 rounded text-sm', isVideoMuted ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">カメラ</button>
           <button @click="screenShare" :disabled="!joined" :title="isScreenSharing ? '共有停止' : '画面共有'" :class="['px-3 py-1.5 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed', isScreenSharing ? 'bg-red-600 text-white' : 'bg-blue-600 text-white']">画面共有🖥️</button>
           <button @click="toggleBackgroundBlur" :title="'背景ぼかし'" :class="['px-3 py-1.5 rounded text-sm', isBackgroundBlurred ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white']">{{ isBackgroundBlurred ? '背景ぼかし ON' : '背景ぼかし OFF' }}</button>
-          <button @click="toggleRnnoise" :title="'ノイズ抑制'" :class="['px-3 py-1.5 rounded text-sm', audioNoiseSuppressionMode === 'suppressor' ? 'bg-purple-600 text-white' : 'bg-purple-200 text-purple-900']">{{ audioNoiseSuppressionMode === 'suppressor' ? '音声: suppressor' : '音声: 標準' }}</button>
+          <button @click="toggleRnnoise" :title="'ノイズ抑制'" :class="['px-3 py-1.5 rounded text-sm', audioNoiseSuppressionMode === 'standard' ? 'bg-purple-200 text-purple-900' : 'bg-purple-600 text-white']">{{ audioNoiseSuppressionMode === 'suppressor' ? '音声: suppressor' : (audioNoiseSuppressionMode === 'rnnoise' ? '音声: rnnoise' : '音声: 標準') }}</button>
         </div>
         <div class="relative">
           <button @click="showSettingsOpen = !showSettingsOpen" class="px-3 py-1.5 rounded bg-gray-100 text-sm hover:bg-gray-200" title="設定">設定</button>
